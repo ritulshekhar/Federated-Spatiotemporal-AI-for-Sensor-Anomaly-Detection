@@ -1,0 +1,32 @@
+# --- environments ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- data (§4: data/raw is gitignored; harmonized/processed are derived artefacts) ---
+data/raw/
+data/harmonized/
+data/processed/
+data/interim/
+
+# --- outputs ---
+outputs/
+runs/
+*.ckpt
+*.pt
+*.log
+
+# --- keep the directory skeleton in git ---
+!.gitkeep
+
+# --- editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

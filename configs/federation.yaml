@@ -1,0 +1,45 @@
+# FedAirGuard — federated training configuration (CLAUDE.md §5.7, §7.3)
+# Phase 2. Present now so the contract is fixed before the code lands.
+
+rounds: 60
+local_epochs: 2
+client_fraction: 1.0          # all 10 Barcelona nodes participate each round
+seed: 1337
+
+# ---------------------------------------------------------------------------
+# Aggregation weighting (CLAUDE.md §5.7) — LOCKED DEFAULT
+# ---------------------------------------------------------------------------
+# Plain FedAvg weights each client by its local sample count. With a second
+# region (CPCB) in play that lets whichever region has more stations or more
+# readings dominate the global model. Region-first weighting is the default:
+# every region gets equal aggregate weight regardless of station count, split
+# evenly among that region's own stations.
+aggregation:
+  scheme: region_first        # region_first | sample_count | uniform | clustered
+  # clustered = Hammad et al. (2026) Communities of Interest. Phase 3+ stretch,
+  # only if region_first proves insufficient.
+  clustered:
+    n_clusters: 3
+    features: [temporal_correlation, spatial_proximity, region]
+
+# ---------------------------------------------------------------------------
+# Privacy contract (CLAUDE.md §2.4, §7.1) — enforced in code, not by convention
+# ---------------------------------------------------------------------------
+# src/federated/client.py asserts every outbound payload against this list.
+# Anything not named here is a contract violation and raises.
+privacy:
+  transmitted_from_node:
+    - gru_weight_update
+    - encoder_hidden_state
+    - n_samples            # scalar count, needed for reporting only, never for
+                           # aggregation weighting under region_first
+  never_transmitted:
+    - raw_readings
+    - normalization_statistics
+    - validity_flags
+    - station_coordinates  # server holds these from public metadata, not uploads
+
+communication:
+  # Reported in §8.2 "communication cost per round (MB)".
+  measure_payload_bytes: true
+  compress_weights: false    # keep the honest, uncompressed number as baseline

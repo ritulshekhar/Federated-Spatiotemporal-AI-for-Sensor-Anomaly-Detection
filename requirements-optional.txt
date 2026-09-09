@@ -1,0 +1,5 @@
+# Optional dependencies. The core pipeline runs without these; individual
+# entry points degrade gracefully and say so rather than crashing.
+
+airbase>=1.0        # EEA Air Quality e-Reporting download client (src/data/fetch_eea.py)
+matplotlib>=3.8     # plots in src/evaluation/report.py and the Phase 3 dashboard

@@ -1,0 +1,76 @@
+# FedAirGuard — model hyperparameters (CLAUDE.md §7)
+
+seed: 1337
+
+# ---------------------------------------------------------------------------
+# Node tier: per-station GRU encoder-decoder (§7.1)
+# ---------------------------------------------------------------------------
+node_gru:
+  hidden_size: 64
+  num_layers: 1
+  dropout: 0.1
+  # The encoder's final hidden state is what leaves the node for the server GNN.
+  # Nothing else does. Keeping this small is both a privacy and a comms lever
+  # (§8.2 "communication cost per round").
+  embedding_size: 64
+
+  train:
+    epochs: 40
+    batch_size: 128
+    lr: 0.001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    early_stopping_patience: 6
+    scheduler: plateau
+    scheduler_factor: 0.5
+    scheduler_patience: 3
+
+# ---------------------------------------------------------------------------
+# Centralised baselines (§8.1 rungs 3 and 4)
+# ---------------------------------------------------------------------------
+centralised_gru:
+  # Same architecture, one shared set of weights over the pooled window set.
+  # NOTE: pooling here is of WINDOWS, not of normalization. Each station is
+  # still z-scored on its own training window (§2.2 / §6.5) and every metric is
+  # still reported per station. Only the model weights are shared.
+  hidden_size: 64
+  num_layers: 1
+  dropout: 0.1
+  train:
+    epochs: 40
+    batch_size: 256
+    lr: 0.001
+    grad_clip: 1.0
+    early_stopping_patience: 6
+
+# ---------------------------------------------------------------------------
+# Server tier: graph network over uploaded hidden states (§7.2) — Phase 2
+# ---------------------------------------------------------------------------
+server_gnn:
+  hidden_size: 64
+  num_layers: 2
+  heads: 4
+  dropout: 0.1
+  # Edge construction. Wang et al. (2020) justifies physically-informed edges.
+  graph:
+    mode: hybrid              # distance | correlation | hybrid
+    distance_km_threshold: 12.0
+    correlation_threshold: 0.5
+    # Correlation is computed on the SERVER from uploaded embeddings, never
+    # from raw station series (§2.4).
+    self_loops: true
+
+# ---------------------------------------------------------------------------
+# Decision layer (§7.4) — Phase 2
+# ---------------------------------------------------------------------------
+decision_layer:
+  # Residual threshold is calibrated per station on the VALIDATION split only.
+  residual_threshold:
+    method: quantile          # quantile | mad | val_f1_sweep
+    quantile: 0.98
+  spatial_agreement:
+    metric: cosine            # cosine | learned
+    high_agreement_threshold: 0.6
+    min_neighbours: 2
+  # LOCKED (§7.4): never one global threshold silently inherited across regions.
+  per_region_calibration: true

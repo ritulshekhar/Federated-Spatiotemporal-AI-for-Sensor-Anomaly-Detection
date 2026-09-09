@@ -1,0 +1,157 @@
+# FedAirGuard — dataset configuration (CLAUDE.md §3, §6)
+#
+# Every path is relative to the repository root.
+
+paths:
+  raw: data/raw
+  harmonized: data/harmonized
+  processed: data/processed
+  outputs: outputs
+
+# ---------------------------------------------------------------------------
+# Primary source: EEA Air Quality e-Reporting, Catalonia (CLAUDE.md §3.1)
+# ---------------------------------------------------------------------------
+eea:
+  country: ES
+  region: catalonia
+
+  # LOCKED (CLAUDE.md §3.1): E1a = verified, annual, QA-reviewed.
+  # E2a (Up-To-Date) carries provisional flags and must never be used.
+  dataset: E1a
+
+  # E1a for year Y is published by 30 September of year Y+1. 2024 is therefore
+  # the newest fully-verified year available as of 2026-09.
+  year_from: 2013
+  year_to: 2024
+
+  pollutants: [PM2.5, PM10, O3, NO2, SO2]
+
+  # Pollutant vocabulary codes and units (CLAUDE.md §3.1). CO is mg/m3 — the
+  # unit trap. src/data/harmonize.py enforces this table.
+  pollutant_units:
+    SO2: ug/m3
+    PM10: ug/m3
+    PM2.5: ug/m3
+    O3: ug/m3
+    NO2: ug/m3
+    CO: mg/m3
+
+# ---------------------------------------------------------------------------
+# Node set: 10 Barcelona city stations (CLAUDE.md §3.1)
+# ---------------------------------------------------------------------------
+# !! UNVERIFIED !! The EoI codes below are a best-effort starting list and have
+# NOT been checked against a real EEA station-metadata download. Before any
+# reported result depends on them, run:
+#
+#     python -m src.data.station_metadata --refresh --print
+#
+# which pulls EEA's PanEuropean_metadata.csv, filters ES / Barcelona, and writes
+# the authoritative codes to data/raw/eea_station_metadata.csv. Correct this
+# block from that output. See CONTEXT.md "Open items".
+stations:
+  - eoi_code: ES1438A
+    name: Barcelona (Gracia - Sant Gervasi)
+    station_class: urban_traffic
+  - eoi_code: ES1396A
+    name: Barcelona (Eixample)
+    station_class: urban_traffic
+  - eoi_code: ES1856A
+    name: Barcelona (Sants)
+    station_class: urban_traffic
+  - eoi_code: ES1679A
+    name: Barcelona (Vall d'Hebron)
+    station_class: urban_background
+  - eoi_code: ES0691A
+    name: Barcelona (Ciutadella)
+    station_class: urban_background
+  - eoi_code: ES1480A
+    name: Barcelona (Poblenou)
+    station_class: urban_background
+  - eoi_code: ES2027A
+    name: Barcelona (Palau Reial)
+    station_class: urban_background
+  - eoi_code: ES1992A
+    name: Barcelona (Observatori Fabra)
+    station_class: suburban_background
+  - eoi_code: ES1362A
+    name: Sant Adria de Besos
+    station_class: urban_industrial
+  - eoi_code: ES0559A
+    name: Badalona
+    station_class: urban_industrial
+
+# ---------------------------------------------------------------------------
+# Preprocessing (CLAUDE.md §6)
+# ---------------------------------------------------------------------------
+preprocessing:
+  # Forecasting target. Multivariate in, univariate out.
+  target_pollutant: NO2
+  # Extra pollutants used as exogenous inputs where the station reports them.
+  feature_pollutants: [PM10, PM2.5, O3, SO2]
+
+  imputation:
+    short_gap_hours: 3          # <= 3h -> linear interpolation (§6.2)
+    seasonal_period_hours: 24   # longer -> same hour, previous day
+    max_fill_hours: 168         # beyond a week, leave NaN and drop the window
+
+  physical_screen:              # §6.3
+    flatline_run_length: 6      # > 6 identical consecutive values
+    ranges:                     # ug/m3 unless noted; generous outer bounds
+      PM2.5: [0.0, 1000.0]
+      PM10: [0.0, 2000.0]
+      NO2: [0.0, 1000.0]
+      O3: [0.0, 800.0]
+      SO2: [0.0, 1000.0]
+      CO: [0.0, 100.0]          # mg/m3
+      temperature_c: [-30.0, 55.0]
+      pressure_hpa: [870.0, 1085.0]
+      relative_humidity: [0.0, 100.0]
+      wind_speed_ms: [0.0, 75.0]
+
+  features:                     # §6.4
+    cyclical: [hour, dayofweek, month]
+    lags: [1, 24, 168]
+    rolling_windows: [6, 24]
+
+  windowing:                    # §6.6
+    input_hours: 24
+    horizon_hours: 6
+    stride: 1
+    horizons_reported: [1, 3, 6]
+    split: {train: 0.70, val: 0.15, test: 0.15}
+
+  quality:
+    # Minimum fraction of the target series that must be genuinely observed
+    # (not imputed) for a station to enter the node set at all.
+    min_observed_fraction: 0.60
+    # §3.1: consider excluding Verification=3 rows from EVALUATION (not training).
+    exclude_unverified_from_eval: true
+
+# ---------------------------------------------------------------------------
+# Meteorology — see CONTEXT.md "Open items"
+# ---------------------------------------------------------------------------
+# EEA Air Quality e-Reporting contains NO meteorological variables, but
+# objective 3 requires them. Met data is therefore joined from an external
+# reanalysis (Open-Meteo ERA5 archive, free, no API key). This is opt-in and
+# clearly a deviation-by-necessity, not a silent design change.
+meteo:
+  enabled: false
+  provider: open_meteo_era5
+  variables:
+    - temperature_2m
+    - relative_humidity_2m
+    - surface_pressure
+    - wind_speed_10m
+    - wind_direction_10m
+    - precipitation
+    - boundary_layer_height
+
+# ---------------------------------------------------------------------------
+# Secondary source: CPCB / India (CLAUDE.md §3.2) — Phase 3 ONLY.
+# ---------------------------------------------------------------------------
+cpcb:
+  enabled: false
+  region: india
+  # LOCKED (CLAUDE.md §2.6): no Validity equivalent exists. Every fault label on
+  # CPCB-origin data is synthetic and is tagged label_source="synthetic".
+  label_source: synthetic

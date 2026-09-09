@@ -1,0 +1,22 @@
+# FedAirGuard — core runtime dependencies
+# Python 3.11+ (developed on 3.13)
+
+# --- data ---
+numpy>=1.26
+pandas>=2.2
+pyarrow>=16.0          # parquet for data/harmonized and data/processed
+pyyaml>=6.0
+requests>=2.31
+
+# --- modelling ---
+torch>=2.4             # GRU encoder-decoder (node tier) and, in Phase 2, the server GNN
+scikit-learn>=1.5      # AUC-PR / precision-recall curves only; scalers are hand-rolled per §6.5
+scipy>=1.13
+
+# --- tooling ---
+tqdm>=4.66
+pytest>=8.0
+
+# --- optional / installed separately, see requirements-optional.txt ---
+# airbase          : EEA download client (src/data/fetch_eea.py)
+# matplotlib       : figures for the report
