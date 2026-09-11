@@ -56,7 +56,9 @@ _DEMO_STATIONS: list[tuple[str, str, float, float, float]] = [
 # operate on the imbalanced regime the real problem has.
 _FAULT_RATE = 0.030          # Validity = -1
 _MAINTENANCE_RATE = 0.008    # Validity = -99
-_GAP_RATE = 0.012            # row absent entirely
+_GAP_RATE = 0.008            # isolated missing hours
+_OUTAGE_RATE = 0.006         # multi-day outages, so §6.2's seasonal-naive branch
+                             # is actually exercised and not just the linear one
 _EPISODE_RATE = 0.004        # genuine high-pollution event, Validity stays 1
 
 
@@ -104,11 +106,17 @@ def generate_demo_raw(cfg: dict, years: int = 3, seed: int = 1337) -> pd.DataFra
         local = _ou_process(n, theta=0.15, sigma=1.0, rng=rng)
         local = (local - local.mean()) / (local.std() + 1e-9)
 
+        # All four pollutants for this station are generated together, because
+        # PM2.5 has to be derived FROM PM10 rather than drawn beside it — PM2.5
+        # is physically a subset of PM10, so an independent draw would produce
+        # PM2.5 > PM10 in a few percent of hours and §6.3's inversion screen
+        # would spend its time detecting the generator instead of the data.
+        station_series = _station_series(
+            base, amp, noise_sd, diurnal, weekly, winter, regional, local, rng, n,
+        )
+
         for pol in pollutants:
-            series = _pollutant_series(
-                pol, base, amp, noise_sd, diurnal, weekly, winter,
-                regional, local, rng, n,
-            )
+            series = station_series[pol]
             validity = np.ones(n, dtype=int)
 
             # Genuine episodes: a real, large, spatially-coherent excursion that
@@ -138,6 +146,8 @@ def generate_demo_raw(cfg: dict, years: int = 3, seed: int = 1337) -> pd.DataFra
                 validity[s:s + dur] = -99
 
             keep = rng.random(n) > _GAP_RATE
+            for s, dur in _runs(n, _OUTAGE_RATE, 30, 200, rng):
+                keep[s:s + dur] = False
             frames.append(pd.DataFrame({
                 "AirQualityStationEoICode": sid,
                 "Countrycode": "ES",
@@ -163,24 +173,29 @@ def generate_demo_raw(cfg: dict, years: int = 3, seed: int = 1337) -> pd.DataFra
 
 
 # ---------------------------------------------------------------------------
-def _pollutant_series(pol, base, amp, noise_sd, diurnal, weekly, winter,
-                      regional, local, rng, n) -> np.ndarray:
-    """Per-pollutant composition of the shared components."""
-    if pol == "NO2":
-        s = (base + amp * diurnal * weekly + 8.0 * winter
-             + 9.0 * regional + 4.0 * local)
-    elif pol == "PM10":
-        s = (0.7 * base + 0.5 * amp * diurnal * weekly + 4.0 * winter
-             + 11.0 * regional + 5.0 * local)
-    elif pol == "PM2.5":
-        # Kept strictly below PM10 in the mean so §6.3's PM2.5 > PM10 screen
-        # fires on genuine inconsistencies rather than on the generator itself.
-        s = (0.42 * base + 0.3 * amp * diurnal * weekly + 3.0 * winter
-             + 7.0 * regional + 3.0 * local)
-    else:  # O3 — anticorrelated with NO2, peaks midday in summer
-        s = (55.0 - 0.35 * amp * diurnal * weekly - 14.0 * winter
-             + 6.0 * regional + 3.0 * local)
-    return np.maximum(s + rng.normal(0.0, noise_sd, n), 0.2)
+def _station_series(base, amp, noise_sd, diurnal, weekly, winter,
+                    regional, local, rng, n) -> dict[str, np.ndarray]:
+    """All four pollutants for one station, generated jointly."""
+    no2 = (base + amp * diurnal * weekly + 8.0 * winter
+           + 9.0 * regional + 4.0 * local)
+    pm10 = (0.7 * base + 0.5 * amp * diurnal * weekly + 4.0 * winter
+            + 11.0 * regional + 5.0 * local)
+    # O3 — anticorrelated with NO2, peaks midday in summer.
+    o3 = (55.0 - 0.35 * amp * diurnal * weekly - 14.0 * winter
+          + 6.0 * regional + 3.0 * local)
+
+    no2 = np.maximum(no2 + rng.normal(0.0, noise_sd, n), 0.2)
+    pm10 = np.maximum(pm10 + rng.normal(0.0, noise_sd, n), 0.5)
+    o3 = np.maximum(o3 + rng.normal(0.0, noise_sd, n), 0.2)
+
+    # PM2.5 as a slowly-varying fraction of PM10, bounded in (0.25, 0.85), so
+    # the subset relationship holds by construction at every hour.
+    ratio_walk = _ou_process(n, theta=0.01, sigma=1.0, rng=rng)
+    ratio_walk /= (np.abs(ratio_walk).max() + 1e-9)
+    ratio = np.clip(0.55 + 0.25 * ratio_walk + rng.normal(0.0, 0.02, n), 0.25, 0.85)
+    pm25 = pm10 * ratio
+
+    return {"NO2": no2, "PM10": pm10, "PM2.5": pm25, "O3": o3}
 
 
 def _ou_process(n: int, theta: float, sigma: float, rng) -> np.ndarray:

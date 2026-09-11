@@ -127,3 +127,110 @@ property that makes real EEA labels usable at all.
    Confirm against the EEA portal.
 4. **CPCB schema unverified** — unchanged from §11; `harmonize_cpcb` and
    `fetch_cpcb.fetch` both raise.
+
+---
+
+## [2026-09-11] entry 2 — preprocessing pipeline, evaluation layer, node GRU, baseline ladder rungs 1–3
+
+### What changed
+
+**Preprocessing** (`src/preprocessing/`, all of §6)
+- `indexing.py` (§6.1): long common schema → one contiguous hourly wide frame
+  per station, with a per-pollutant gap report. Fixes the column convention
+  every later stage uses (`<POL>`, `<POL>__validity`, `__verification`,
+  `__label`, then `__is_imputed`, `__physical_flag`).
+- `imputation.py` (§6.2): `is_imputed` mask built *before* filling. ≤3h gaps get
+  linear interpolation, longer ones get seasonal-naive (same hour, nearest
+  observed earlier day, then later day), and gaps over 168h stay NaN on purpose
+  so windowing drops them.
+- `validity_screen.py` (§6.3): negatives, out-of-range, flatline runs over 6,
+  and PM2.5 > PM10. It only flags rows and never deletes them. It also logs how
+  much the flags overlap with the real Validity faults, which gives an
+  unsupervised floor to compare detectors against.
+- `features.py` (§6.4): sin/cos calendar encodings, a weekend flag, lags
+  t-1/t-24/t-168, and rolling mean/std over 6h and 24h. Everything is causal.
+  Wind direction takes either degrees or a 16-point compass label.
+- `normalize.py` (§6.5): `LocalScaler`, fitted on the train window only and
+  saved to the station's own directory. It carries a `NEVER_TRANSMIT` marker,
+  and `contains_normalization_statistics()` is the recursive check the Phase 2
+  federated client will run against it.
+- `windowing.py` (§6.6): chronological 70/15/15 boundaries, windows of 24h in
+  and 6h out at stride 1. A window whose full span (inputs and targets) doesn't
+  sit inside one split is dropped. Each window carries its target-side imputed
+  mask, label, physical flag and Verification code.
+- `fault_labels.py` (§6.7): rate-matched synthetic injection covering
+  stuck_at, drift, spike, noise, dropout and bias. `target_rate` has no default.
+  Injection never touches rows that already have real faults or were imputed,
+  and it writes to separate `__synthetic_label` columns so the real labels are
+  never overwritten.
+- `pipeline.py`: runs the whole chain for each station separately and writes
+  `data/processed/<station>/{train,val,test}.npz`, `scaler.json` and
+  `manifest.json`, plus a run manifest per region. A station is excluded if
+  less than 60% of its target was actually observed.
+
+**Stage-order deviation (minimal, documented in `pipeline.py`):** §6 lists
+normalization (6.5) before windowing/split (6.6), but fitting "on the training
+window" requires knowing where that window ends. So split *boundaries* are now
+computed between 6.4 and 6.5, and windowing itself still runs after 6.5.
+Nothing else in the order moved.
+
+**Evaluation** (`src/evaluation/`)
+- `metrics.py`: RMSE/MAE/MAPE/bias in physical units. MAPE skips |y| < 1 ug/m3
+  and counts how many points it skipped. Also precision/recall/F1/AUC-PR plus
+  `fpr_on_extremes`, the Gupchup (2019) control. `anomaly_metrics` can't be
+  called without the extreme-reading mask.
+- `report.py`: every aggregation runs through `_grouped`, which raises
+  `PoolingError` if `(region, station_class, label_source)` is missing from the
+  grouping. No function returns a scalar across stations. `spread_table`
+  reports min/median/max over stations and never a mean.
+- Thresholds are keyed by **(model, station)**, not just station. The first
+  draft keyed by station only, which would have scored every rung at
+  persistence's operating point. Each rung produces residuals on a different
+  scale, so each one needs its own threshold, calibrated on validation.
+
+**Model** (`src/models/node_gru.py`): a GRU encoder with a GRU decoder (not a
+dense head), teacher forcing annealed from 0.5 to 0, early stopping on val.
+`encode()` / `embed()` are the only way hidden states get out, and that is the
+Phase 2 split-learning hook. `payload_bytes()` supplies the §8.2 comms metric.
+
+**Baselines** (`src/baselines/ladder.py`): rungs 1 (persistence), 2 (local GRU)
+and 3 (centralised GRU). Rung 3 pools *windows* and shares weights across
+stations, but normalization and reporting stay per station. Stations can report
+different pollutants, so rung 3 uses the feature columns they all share rather
+than zero-filling the missing ones. Rungs 4–6 raise `NotImplementedError`.
+Every rung goes through one scoring path (`score_station`).
+
+**Demo generator fix** (`src/data/demo_source.py`): PM2.5 is now derived as a
+bounded fraction of PM10 instead of being drawn separately. The separate draw
+had put PM2.5 above PM10 in ~10.5% of hours, so §6.3 was mostly flagging
+generator artefacts. It's now ~3%, and all of that comes from pollution
+episodes applied to each pollutant on its own. I also added multi-day outages
+so the seasonal-naive and left-NaN imputation branches actually run.
+
+### Verified vs. not yet verified
+
+- **Verified on the demo region (simulated, not reportable):** harmonize → full
+  §6 pipeline on all 10 stations, and rung 1 end to end with the grouped
+  forecast and anomaly tables written to `outputs/phase1_demo/`. The linear,
+  seasonal and left-NaN imputation branches all ran.
+- **Not yet run end to end: rungs 2 and 3.** A 2-epoch smoke test failed before
+  it reached any project code (`ModuleNotFoundError: src`) because the script
+  ran from outside the repo root. That was an invocation problem, not a code
+  result, so the GRU training path hasn't been exercised yet. Run
+  `python -m src.baselines.ladder --region demo` from the repo root next.
+- **Still no tests** under `tests/`.
+
+### Open items (carried forward, plus new)
+
+1. Station EoI codes unverified (entry 1, still the top priority).
+2. EEA has no meteorology (entry 1).
+3. **New:** the demo test fault rate differs a lot between stations (2.8%–6.8%),
+   because chronological splits land on different fault episodes. This is
+   expected. It's also a reminder that anomaly metrics from one test window are
+   noisy, so real results will need confidence intervals, for example a block
+   bootstrap over time.
+4. **New:** rung 1 on the demo already gives `fpr_on_extremes` > 0 at 6h for
+   several stations. That is the naive residual detector flagging real
+   episodes, the exact behaviour rung 6 has to beat. The number itself doesn't
+   mean anything yet (simulated data), but it confirms the control column
+   works.

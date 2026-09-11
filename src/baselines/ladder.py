@@ -1,0 +1,405 @@
+"""§8.1 — The baseline ladder.
+
+    1. Persistence (last observed value)                  [Phase 1]
+    2. Local-only per-station GRU (no federation)         [Phase 1]
+    3. Centralised GRU (pooled windows, no privacy)       [Phase 1]
+    4. Centralised ST-GNN (accuracy ceiling)              [Phase 2]
+    5. FedAvg + GRU (federated, no spatial reasoning)     [Phase 2]
+    6. Proposed: federated GRU + server GNN + decision    [Phase 2]
+
+Built in order, every rung before the next (§8.1). Rungs 1-3 must be working
+and reported before the graph layer starts — the graph layer is the highest-risk
+component, and locking the ladder first guarantees a defensible result even if
+it underperforms.
+
+Each rung produces forecasts **and** an anomaly decision, because the anomaly
+classification is the point (§1) and a forecasting-only table would let the
+project drift towards optimising the mechanism instead of the objective. The
+Phase 1 rungs use the simplest possible decision rule — threshold the residual —
+which is deliberately the naive detector Gupchup et al. (2019) showed
+misclassifies real events as faults. Its ``fpr_on_extremes`` column is the
+number rung 6 has to beat, and having it early makes that comparison concrete
+rather than rhetorical.
+
+**One note on "pooling" in rung 3.** §8.1 calls rung 3 "all stations pooled, no
+privacy constraint". What is pooled is the *window set* — one shared set of
+model weights trained on every station's windows. Normalization stays
+per-station (§2.2/§6.5: a shared scaler is itself a privacy leak and a
+distribution leak), and every metric stays per-station (§8.3). Rung 3 is the
+no-privacy *training* reference, not permission to pool the reporting.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from src.evaluation.metrics import calibrate_threshold, extreme_mask, residual_score
+from src.evaluation.report import build_report, make_records
+from src.preprocessing.normalize import LocalScaler
+from src.preprocessing.windowing import SPLITS, WindowSet, load_windows
+from src.utils.logging_setup import get_logger
+from src.utils.paths import data_paths, load_config, station_dir
+
+log = get_logger(__name__)
+
+
+@dataclass
+class StationData:
+    """One station's window splits, its local scaler, and its manifest."""
+    station_id: str
+    splits: dict[str, WindowSet]
+    scaler: LocalScaler
+    manifest: dict
+
+    @property
+    def target(self) -> str:
+        return self.manifest["target"]
+
+    @property
+    def target_index(self) -> int:
+        return self.splits["train"].feature_columns.index(self.target)
+
+    @property
+    def target_scale(self) -> float:
+        """Local std of the target, in physical units. Stays on the node."""
+        return self.scaler.scale_of(self.target)
+
+    def y_pred_raw(self, y_pred_norm: np.ndarray) -> np.ndarray:
+        return self.scaler.inverse_transform_column(y_pred_norm, self.target)
+
+
+def load_station(station_id: str) -> StationData:
+    d = station_dir(station_id, "processed")
+    missing = [s for s in SPLITS if not (d / f"{s}.npz").exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"{station_id}: missing {missing} under {d}. Run "
+            "`python -m src.preprocessing.pipeline --region <region>` first."
+        )
+    return StationData(
+        station_id=station_id,
+        splits={s: load_windows(d / f"{s}.npz") for s in SPLITS},
+        scaler=LocalScaler.load(d / "scaler.json"),
+        manifest=json.loads((d / "manifest.json").read_text(encoding="utf-8")),
+    )
+
+
+def load_region(region: str) -> list[StationData]:
+    manifest_path = data_paths()["processed"] / f"run_manifest_{region}.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"{manifest_path} not found. Run the preprocessing pipeline for "
+            f"region {region!r} first."
+        )
+    ids = json.loads(manifest_path.read_text(encoding="utf-8"))["stations_processed"]
+    return [load_station(sid) for sid in ids]
+
+
+# ---------------------------------------------------------------------------
+# Shared scoring path — every rung goes through this, so no rung can quietly
+# use a different threshold rule or skip the false-positive control.
+# ---------------------------------------------------------------------------
+def score_station(station: StationData, model_name: str,
+                  pred_val_norm: np.ndarray, pred_test_norm: np.ndarray,
+                  extreme_quantile: float = 0.95,
+                  threshold_method: str = "quantile",
+                  threshold_quantile: float = 0.98) -> tuple[pd.DataFrame, float]:
+    """Turn one station's forecasts into prediction records and a threshold.
+
+    The threshold is calibrated on that station's **validation** split, never on
+    test, and never shared with another station (§5.8, §7.4).
+    """
+    val, test = station.splits["val"], station.splits["test"]
+    scale = station.target_scale
+
+    val_score = residual_score(val.y_raw, station.y_pred_raw(pred_val_norm), scale)
+    threshold = calibrate_threshold(
+        val_score, method=threshold_method, quantile=threshold_quantile,
+        mask=~val.target_is_imputed,
+    )
+
+    test_pred_raw = station.y_pred_raw(pred_test_norm)
+    test_score = residual_score(test.y_raw, test_pred_raw, scale)
+
+    # "Extreme" is defined on the TRAINING target, so the control does not move
+    # with the test set it is meant to police.
+    is_extreme = extreme_mask(
+        test.y_raw, quantile=extreme_quantile,
+        reference=station.splits["train"].y_raw.ravel(),
+    )
+
+    labels = np.where(test.target_label == 1, "fault",
+                      np.where(test.target_label == 0, "trustworthy", "unknown"))
+
+    records = make_records(
+        model=model_name,
+        station_id=station.station_id,
+        region=test.region,
+        station_class=test.station_class,
+        label_source=test.label_source,
+        t_target=test.t_target,
+        y_true=test.y_raw,
+        y_pred=test_pred_raw,
+        is_imputed=test.target_is_imputed,
+        label=labels,
+        is_extreme=is_extreme,
+        score=test_score,
+        horizons=list(range(1, test.horizon + 1)),
+    )
+    return records, float(threshold)
+
+
+# ---------------------------------------------------------------------------
+# Rung 1 — persistence
+# ---------------------------------------------------------------------------
+def rung1_persistence(stations: list[StationData], **score_kwargs):
+    """ŷ(t+h) = y(t), for every h. The floor any model must clear."""
+    records, thresholds = [], {}
+    for st in stations:
+        preds = {}
+        for split in ("val", "test"):
+            ws = st.splits[split]
+            last = ws.X[:, -1, st.target_index]            # normalized space
+            preds[split] = np.repeat(last[:, None], ws.horizon, axis=1)
+        r, thr = score_station(st, "1_persistence", preds["val"], preds["test"],
+                               **score_kwargs)
+        records.append(r)
+        thresholds[("1_persistence", st.station_id)] = thr
+    return pd.concat(records, ignore_index=True), thresholds
+
+
+# ---------------------------------------------------------------------------
+# Rung 2 — local-only GRU
+# ---------------------------------------------------------------------------
+def rung2_local_gru(stations: list[StationData], model_cfg: dict,
+                    seed: int = 1337, **score_kwargs):
+    """One GRU per station, trained only on that station's own data."""
+    from src.models.node_gru import NodeTrainer
+
+    records, thresholds, histories = [], {}, {}
+    for st in stations:
+        train, val = st.splits["train"], st.splits["val"]
+        trainer = NodeTrainer(
+            n_features=train.X.shape[2], horizon=train.horizon,
+            cfg=model_cfg["node_gru"], target_index=st.target_index,
+            station_id=st.station_id, seed=seed,
+        )
+        log.info("%s | rung 2: training on %s windows (%d params)",
+                 st.station_id, f"{len(train):,}", trainer.n_parameters())
+        trainer.fit(train.X, train.y, val.X, val.y)
+        histories[st.station_id] = trainer.history.as_dict()
+
+        r, thr = score_station(st, "2_local_gru",
+                               trainer.predict(val.X), trainer.predict(st.splits["test"].X),
+                               **score_kwargs)
+        records.append(r)
+        thresholds[("2_local_gru", st.station_id)] = thr
+    return pd.concat(records, ignore_index=True), thresholds, histories
+
+
+# ---------------------------------------------------------------------------
+# Rung 3 — centralised GRU
+# ---------------------------------------------------------------------------
+def rung3_centralised_gru(stations: list[StationData], model_cfg: dict,
+                          seed: int = 1337, **score_kwargs):
+    """One shared GRU over every station's windows. No privacy constraint.
+
+    Upper reference for what federation costs in accuracy (§8.1 rung 3,
+    compared against Khan et al. 2024's 94.5% vs 96.7% federated-vs-centralised
+    benchmark at rung 5).
+    """
+    from src.models.node_gru import NodeTrainer
+
+    common, per_station_idx = align_features(stations)
+    log.info("rung 3: %d feature column(s) common to all %d station(s)",
+             len(common), len(stations))
+
+    X_tr = np.concatenate([st.splits["train"].X[:, :, per_station_idx[st.station_id]]
+                           for st in stations], axis=0)
+    y_tr = np.concatenate([st.splits["train"].y for st in stations], axis=0)
+    X_va = np.concatenate([st.splits["val"].X[:, :, per_station_idx[st.station_id]]
+                           for st in stations], axis=0)
+    y_va = np.concatenate([st.splits["val"].y for st in stations], axis=0)
+
+    target = stations[0].target
+    trainer = NodeTrainer(
+        n_features=len(common), horizon=stations[0].splits["train"].horizon,
+        cfg=model_cfg["centralised_gru"], target_index=common.index(target),
+        station_id="CENTRALISED", seed=seed,
+    )
+    log.info("rung 3: training on %s pooled windows (%d params)",
+             f"{len(X_tr):,}", trainer.n_parameters())
+    trainer.fit(X_tr, y_tr, X_va, y_va)
+
+    records, thresholds = [], {}
+    for st in stations:
+        idx = per_station_idx[st.station_id]
+        r, thr = score_station(
+            st, "3_centralised_gru",
+            trainer.predict(st.splits["val"].X[:, :, idx]),
+            trainer.predict(st.splits["test"].X[:, :, idx]),
+            **score_kwargs,
+        )
+        records.append(r)
+        thresholds[("3_centralised_gru", st.station_id)] = thr
+    return pd.concat(records, ignore_index=True), thresholds, trainer.history.as_dict()
+
+
+def align_features(stations: list[StationData]) -> tuple[list[str], dict[str, np.ndarray]]:
+    """Common feature columns across stations, plus per-station reorder indices.
+
+    Real EEA stations do not all report the same pollutants, so their feature
+    matrices differ in width and order. A shared model needs one column order;
+    taking the intersection keeps that honest rather than zero-filling absent
+    pollutants, which would teach the model that "missing" means "zero".
+    """
+    sets = [set(st.splits["train"].feature_columns) for st in stations]
+    common_set = set.intersection(*sets)
+    if not common_set:
+        raise ValueError("stations share no feature columns")
+
+    # Preserve the first station's ordering for determinism.
+    common = [c for c in stations[0].splits["train"].feature_columns if c in common_set]
+    target = stations[0].target
+    if target not in common:
+        raise ValueError(f"target {target!r} is not common to all stations")
+
+    dropped = {st.station_id: sorted(set(st.splits["train"].feature_columns) - common_set)
+               for st in stations}
+    for sid, cols in dropped.items():
+        if cols:
+            log.info("rung 3: %s drops %d station-specific feature(s): %s",
+                     sid, len(cols), cols[:6])
+
+    idx = {
+        st.station_id: np.array(
+            [st.splits["train"].feature_columns.index(c) for c in common], dtype=int
+        )
+        for st in stations
+    }
+    return common, idx
+
+
+# ---------------------------------------------------------------------------
+# Rungs 4-6 — Phase 2
+# ---------------------------------------------------------------------------
+def rung4_centralised_stgnn(*_args, **_kwargs):
+    raise NotImplementedError(
+        "Rung 4 (centralised ST-GNN, the accuracy ceiling) is Phase 2. §8.1: "
+        "rungs 1-3 must be working and reported first."
+    )
+
+
+def rung5_fedavg_gru(*_args, **_kwargs):
+    raise NotImplementedError(
+        "Rung 5 (FedAvg + GRU) is Phase 2. Compare against Khan et al. (2024), "
+        "94.5% federated vs 96.7% centralised."
+    )
+
+
+def rung6_proposed(*_args, **_kwargs):
+    raise NotImplementedError(
+        "Rung 6 (federated GRU + server GNN + decision layer) is the proposed "
+        "model, Phase 2. Its spatial_agreement() has no direct precedent "
+        "computing agreement from compressed embeddings (§11) — expect real "
+        "experimentation and report negative results honestly."
+    )
+
+
+# ---------------------------------------------------------------------------
+def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
+               out_name: str | None = None) -> Path:
+    """Run the Phase 1 rungs over one region and write one grouped report."""
+    data_cfg = load_config("data")
+    model_cfg = load_config("model")
+    horizons = data_cfg["preprocessing"]["windowing"]["horizons_reported"]
+    dec = model_cfg["decision_layer"]["residual_threshold"]
+    seed = model_cfg.get("seed", 1337)
+
+    stations = load_region(region)
+    log.info("loaded %d station(s) for region %r", len(stations), region)
+
+    score_kwargs = {
+        "threshold_method": dec["method"],
+        "threshold_quantile": dec["quantile"],
+    }
+
+    all_records, all_thresholds, extras = [], {}, {}
+
+    if 1 in rungs:
+        rec, thr = rung1_persistence(stations, **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+
+    if 2 in rungs:
+        rec, thr, hist = rung2_local_gru(stations, model_cfg, seed=seed, **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+        extras["rung2_history"] = hist
+
+    if 3 in rungs:
+        rec, thr, hist = rung3_centralised_gru(stations, model_cfg, seed=seed,
+                                               **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+        extras["rung3_history"] = hist
+
+    if not all_records:
+        raise ValueError(f"no rungs selected from {rungs}")
+
+    records = pd.concat(all_records, ignore_index=True)
+
+    report = build_report(
+        name=out_name or f"phase1_{region}",
+        records=records,
+        thresholds=all_thresholds,
+        horizons=horizons,
+        meta={
+            "region": region,
+            "rungs": list(rungs),
+            "seed": seed,
+            "n_stations": len(stations),
+            "target": stations[0].target,
+            "threshold": score_kwargs,
+            "extreme_quantile": 0.95,
+            "thresholds_per_model_station": {
+                f"{m}|{s}": v for (m, s), v in all_thresholds.items()
+            },
+            **{k: v for k, v in extras.items()},
+        },
+    )
+    report.print_summary(horizons=horizons)
+    return report.write()
+
+
+def main() -> None:
+    import argparse
+
+    from src.utils.seeding import seed_everything
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--region", default="catalonia")
+    ap.add_argument("--rungs", nargs="*", type=int, default=[1, 2, 3],
+                    help="which ladder rungs to run (Phase 1 supports 1 2 3)")
+    ap.add_argument("--name", default=None, help="report directory name")
+    args = ap.parse_args()
+
+    unsupported = [r for r in args.rungs if r not in (1, 2, 3)]
+    if unsupported:
+        raise SystemExit(
+            f"rung(s) {unsupported} are Phase 2 (§8.1/§9). Rungs 1-3 must be "
+            "working and reported first."
+        )
+
+    seed_everything(load_config("model").get("seed", 1337))
+    out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name)
+    print(f"\nreport -> {out}")
+
+
+if __name__ == "__main__":
+    main()
