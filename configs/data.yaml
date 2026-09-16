@@ -19,12 +19,35 @@ eea:
   # E2a (Up-To-Date) carries provisional flags and must never be used.
   dataset: E1a
 
-  # E1a for year Y is published by 30 September of year Y+1. 2024 is therefore
-  # the newest fully-verified year available as of 2026-09.
-  year_from: 2013
+  # VERIFIED 2026-09-16 against the actual download. Two corrections to the
+  # original guess, both measured rather than assumed:
+  #
+  # year_from: 2017, not 2013. EEA's Catalonia E1a delivery carries NO negative
+  #   Validity codes before 2017 — 477,114 rows, every single one flagged valid,
+  #   then ~2.6-3.5% faults every year from 2017 on. That is a change in
+  #   reporting practice, not four fault-free years. Including those years
+  #   dilutes the measured fault rate (1.91% over 2013-2025 vs 2.81% over
+  #   2017-2024) and would train the model that older data never fails.
+  #
+  # year_to: 2024, and this one happens to be right but for the wrong reason.
+  #   The service actually serves verified data into 2025 (airbase's own docs
+  #   claiming 2013-2023 are stale), but only 2 of the 7 stations have 2025
+  #   coverage — the other 5 have a single row. 2024 is the last year complete
+  #   across the whole node set.
+  #
+  # All rows in the download are Verification=1. Validity codes present are
+  # only 1 and -1: there is no -99 (maintenance) anywhere in this node set, so
+  # the "most valuable label" in CLAUDE.md §3.1 is simply absent here.
+  year_from: 2017
   year_to: 2024
 
   pollutants: [PM2.5, PM10, O3, NO2, SO2]
+
+  # EEA's "city" is the greater urban area, not the municipality: filtering on
+  # Barcelona returns 23 Catalonia stations, including some in neighbouring
+  # municipalities. It cuts the download from ~2.2 GB (all of ES) to ~58 MB.
+  # "Badalona" is not a city EEA recognises and is silently skipped.
+  cities: [Barcelona]
 
   # Pollutant vocabulary codes and units (CLAUDE.md §3.1). CO is mg/m3 — the
   # unit trap. src/data/harmonize.py enforces this table.
@@ -39,46 +62,76 @@ eea:
 # ---------------------------------------------------------------------------
 # Node set: 10 Barcelona city stations (CLAUDE.md §3.1)
 # ---------------------------------------------------------------------------
-# !! UNVERIFIED !! The EoI codes below are a best-effort starting list and have
-# NOT been checked against a real EEA station-metadata download. Before any
-# reported result depends on them, run:
+# VERIFIED 2026-09-16 against data/raw/eea_station_metadata.csv. All ten EoI
+# codes exist in the EEA registry; every station_class below is now the
+# registry's own area x type, not a guess. Several of the original guesses were
+# wrong (ES1396A, ES1856A and ES1992A are background, not traffic/suburban;
+# ES1480A and ES0559A are traffic, not background/industrial).
 #
+# The `name` fields are NOT verified — this registry export carries no station
+# name column, so they remain best-effort labels. `municipality` comes from the
+# INE prefix of AirQualityStationNatCode and IS verified.
+#
+# Re-check at any time with:
 #     python -m src.data.station_metadata --refresh --print
 #
-# which pulls EEA's PanEuropean_metadata.csv, filters ES / Barcelona, and writes
-# the authoritative codes to data/raw/eea_station_metadata.csv. Correct this
-# block from that output. See CONTEXT.md "Open items".
+# `no2` marks whether the station reports the current target pollutant. Only 7
+# of the 10 do; the other 3 report PM10 (and PM2.5) only and will be excluded
+# by the pipeline's target check while target_pollutant is NO2.
 stations:
   - eoi_code: ES1438A
     name: Barcelona (Gracia - Sant Gervasi)
     station_class: urban_traffic
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES1396A
     name: Barcelona (Eixample)
-    station_class: urban_traffic
+    station_class: urban_background
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES1856A
     name: Barcelona (Sants)
-    station_class: urban_traffic
+    station_class: urban_background
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES1679A
     name: Barcelona (Vall d'Hebron)
     station_class: urban_background
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES0691A
     name: Barcelona (Ciutadella)
     station_class: urban_background
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES1480A
     name: Barcelona (Poblenou)
-    station_class: urban_background
-  - eoi_code: ES2027A
-    name: Barcelona (Palau Reial)
-    station_class: urban_background
+    station_class: urban_traffic
+    municipality: Barcelona
+    no2: true
   - eoi_code: ES1992A
     name: Barcelona (Observatori Fabra)
-    station_class: suburban_background
+    station_class: urban_background
+    municipality: Barcelona
+    no2: true
+  # --- the three below report no NO2, and are outside EEA's "Barcelona" city
+  # --- filter, so they are absent from the current download.
+  - eoi_code: ES2027A
+    name: Badalona
+    station_class: urban_background
+    municipality: Badalona
+    no2: false
   - eoi_code: ES1362A
     name: Sant Adria de Besos
-    station_class: urban_industrial
+    station_class: urban_background
+    municipality: Sant Adria de Besos
+    no2: false
+    note: sampling point closed 2017-12-31
   - eoi_code: ES0559A
-    name: Badalona
-    station_class: urban_industrial
+    name: Barcelona (Sants - traffic)
+    station_class: urban_traffic
+    municipality: Barcelona
+    no2: false
 
 # ---------------------------------------------------------------------------
 # Preprocessing (CLAUDE.md §6)
@@ -124,6 +177,13 @@ preprocessing:
     # Minimum fraction of the target series that must be genuinely observed
     # (not imputed) for a station to enter the node set at all.
     min_observed_fraction: 0.60
+    # Minimum coverage an *exogenous* pollutant needs inside the training window
+    # to survive as a feature. Below this it is dropped for that station only.
+    # Every window requires all of its feature columns to be finite, so one
+    # late-installed instrument would otherwise wipe out a station's whole
+    # history (ES1438A gained PM10/PM2.5 in 2024 and lost 48,892 training
+    # windows to them before this gate existed).
+    min_feature_coverage: 0.80
     # §3.1: consider excluding Verification=3 rows from EVALUATION (not training).
     exclude_unverified_from_eval: true
 

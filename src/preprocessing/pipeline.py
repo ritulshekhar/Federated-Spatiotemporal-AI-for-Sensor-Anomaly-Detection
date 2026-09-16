@@ -94,6 +94,27 @@ def process_station(
             f"observed (< {min_observed:.0%} required). Excluded from the node set."
         )
 
+    # -- split boundaries (§6.6, first half — see the module docstring) ------
+    win = pre["windowing"]
+    boundaries = compute_split_boundaries(
+        frame.index, **{k: float(v) for k, v in win["split"].items()}
+    )
+    log.info("%s | split: train<=%s  val<=%s  test<=%s", station_id,
+             boundaries.train_end.date(), boundaries.val_end.date(),
+             boundaries.last.date())
+
+    # -- drop exogenous pollutants that barely exist during training ---------
+    # A window needs every feature column finite, so one late-installed
+    # instrument silently annihilates a station's entire history: ES1438A added
+    # PM10 and PM2.5 in 2024 and lost all 48,892 of its training windows to
+    # them. A pollutant that was not being measured during the training window
+    # cannot be a training feature, so drop it rather than the station.
+    present = _prune_sparse_features(
+        frame, present, target, boundaries.train_end,
+        min_coverage=float(pre["quality"]["min_feature_coverage"]),
+        station_id=station_id,
+    )
+
     # -- §6.3 ---------------------------------------------------------------
     scr = pre["physical_screen"]
     frame, screening = screen_frame(
@@ -121,15 +142,6 @@ def process_station(
         rolling_windows=feat["rolling_windows"], meteo=meteo,
     )
     raw_target = frame[target].copy()   # physical units, kept for §8.2 metrics
-
-    # -- §6.6, first half ----------------------------------------------------
-    win = pre["windowing"]
-    boundaries = compute_split_boundaries(
-        frame.index, **{k: float(v) for k, v in win["split"].items()}
-    )
-    log.info("%s | split: train<=%s  val<=%s  test<=%s", station_id,
-             boundaries.train_end.date(), boundaries.val_end.date(),
-             boundaries.last.date())
 
     # -- §6.5 ---------------------------------------------------------------
     scaler = fit_local_scaler(frame, feature_cols, boundaries.train_end, station_id)
@@ -175,6 +187,42 @@ def process_station(
         log.info("%s | wrote %s", station_id, out_dir)
 
     return manifest
+
+
+def _prune_sparse_features(frame: pd.DataFrame, present: list[str], target: str,
+                           train_end: pd.Timestamp, min_coverage: float,
+                           station_id: str) -> list[str]:
+    """Drop exogenous pollutants with too little coverage in the train window.
+
+    The target is never dropped — a station that cannot supply its own target
+    has already failed the check above and is excluded outright.
+    """
+    train_slice = frame.loc[frame.index <= train_end]
+    if train_slice.empty:
+        return present
+
+    kept = [target]
+    for pol in present:
+        if pol == target:
+            continue
+        coverage = float(train_slice[pol].notna().mean())
+        if coverage < min_coverage:
+            log.warning(
+                "%s | dropping %s as a feature: only %.1f%% coverage in the "
+                "training window (needs %.0f%%). Its first observation is %s.",
+                station_id, pol, 100 * coverage, 100 * min_coverage,
+                frame[pol].first_valid_index(),
+            )
+            continue
+        kept.append(pol)
+
+    dropped = [p for p in present if p not in kept]
+    if dropped:
+        cols = [c for c in frame.columns
+                if any(c == p or c.startswith(f"{p}__") for p in dropped)]
+        frame.drop(columns=cols, inplace=True)
+        frame.attrs["pollutants"] = kept
+    return kept
 
 
 def run(region: str, inject_synthetic: bool = False,

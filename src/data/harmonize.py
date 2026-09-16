@@ -190,6 +190,46 @@ def _finalise(df: pd.DataFrame) -> pd.DataFrame:
     return df[SCHEMA + EEA_EXTRA].reset_index(drop=True)
 
 
+def filter_years(df: pd.DataFrame, year_from: int, year_to: int) -> pd.DataFrame:
+    """Restrict to ``[year_from, year_to]`` inclusive, on the UTC timestamp.
+
+    A post-download filter rather than a request parameter: airbase 1.x fetches
+    a dataset's whole range and offers no year arguments, so the configured
+    window is applied here instead.
+    """
+    year = df["timestamp_utc"].dt.year
+    kept = df[(year >= year_from) & (year <= year_to)].copy()
+    log.info(
+        "year filter %d-%d: kept %s of %s rows (%.1f%%)",
+        year_from, year_to, f"{len(kept):,}", f"{len(df):,}",
+        100 * len(kept) / max(len(df), 1),
+    )
+    if kept.empty:
+        raise ValueError(
+            f"no rows fall in {year_from}-{year_to}; the data covers "
+            f"{int(year.min())}-{int(year.max())}"
+        )
+    return kept
+
+
+def label_coverage_by_year(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-year fault rate and row count — the check that caught the 2013-2016 gap.
+
+    EEA's Catalonia delivery carries no negative ``Validity`` codes at all before
+    2017: 477k rows, every one flagged valid. That is almost certainly a
+    reporting-practice change rather than four fault-free years, and training on
+    it would quietly teach the model that older data never fails. Run this
+    before choosing a year window for any new region.
+    """
+    year = df["timestamp_utc"].dt.year
+    out = df.assign(year=year).groupby("year").agg(
+        rows=("label", "size"),
+        n_fault=("label", lambda s: int((s == "fault").sum())),
+        fault_rate=("label", lambda s: float((s == "fault").mean())),
+    )
+    return out.reset_index()
+
+
 def real_fault_rate(df: pd.DataFrame) -> float:
     """Measured fault prevalence on real-labelled rows (CLAUDE.md §2.7 / §5.5).
 
@@ -257,6 +297,24 @@ def main() -> None:
         region, label_source, class_map = cfg["eea"]["region"], "real", station_class_lookup()
 
     df = harmonize_eea(raw, class_map, region=region, label_source=label_source)
+
+    if not args.demo:
+        coverage = label_coverage_by_year(df)
+        print("\n=== fault-label coverage by year (check before windowing) ===")
+        print(coverage.to_string(index=False))
+        unlabelled = coverage.loc[coverage["n_fault"] == 0, "year"].tolist()
+        if unlabelled:
+            log.warning(
+                "year(s) %s contain rows but ZERO fault flags. Including them "
+                "dilutes the measured fault rate and teaches the model that "
+                "those periods never fail. Check eea.year_from in "
+                "configs/data.yaml.", unlabelled,
+            )
+        eea = cfg["eea"]
+        df = filter_years(df, int(eea["year_from"]), int(eea["year_to"]))
+        log.info("measured real fault rate (the §5.5 target): %.5f",
+                 real_fault_rate(df))
+
     write_harmonized(df, region)
 
     summary = (

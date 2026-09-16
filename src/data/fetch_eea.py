@@ -101,46 +101,45 @@ def fetch_via_airbase(dest: Path, cfg: dict) -> Path | None:
         )
 
     dest.mkdir(parents=True, exist_ok=True)
+    cities = eea.get("cities") or None
     log.info(
-        "airbase: requesting country=%s pollutants=%s years=%s-%s (E1a, verified)",
-        eea["country"], eea["pollutants"], eea["year_from"], eea["year_to"],
+        "airbase: dataset=Verified (E1a) country=%s cities=%s pollutants=%s",
+        eea["country"], cities or "(all)", eea["pollutants"],
     )
 
-    # airbase's public API changed between 0.x and 1.x. Try the documented 0.x
-    # call first (that is what CLAUDE.md §3.1 records), then the 1.x entry point.
+    # airbase 1.x dataset vocabulary, and why only one value is acceptable:
+    #   "Historical"  -> data delivered 2002-2012, before the AQ Directive
+    #   "Verified"    -> E1a, the QA-reviewed annual delivery  <-- the only one
+    #   "Unverified"  -> E2a, provisional flags, LOCKED OUT by §2/§3.1
+    # Note this call takes no year arguments: airbase fetches the dataset's full
+    # range, so configs' year_from/year_to are applied afterwards as a filter.
     try:
         client = airbase.AirbaseClient()
         request = client.request(
-            country=[eea["country"]],
-            pl=list(eea["pollutants"]),
-            year_from=int(eea["year_from"]),
-            year_to=int(eea["year_to"]),
-            dir=str(dest),
-            verbose=True,
+            "Verified",
+            eea["country"],
+            poll=list(eea["pollutants"]),
+            city=list(cities) if cities else None,
+            frequency="hourly",
         )
-        request.download_to_directory(str(dest), skip_existing=True)
-        return dest
-    except (AttributeError, TypeError) as exc:
-        log.info("airbase 0.x API unavailable (%s); trying the 1.x entry point", exc)
-
-    try:
-        airbase.download(  # type: ignore[attr-defined]
-            airbase.Dataset.Historical,  # type: ignore[attr-defined]
-            dest,
-            countries=[eea["country"]],
-            pollutants=set(eea["pollutants"]),
-            overwrite=False,
-        )
+        request.download(dir=str(dest), skip_existing=True)
         return dest
     except Exception as exc:  # noqa: BLE001 — report and fall through to route 2
-        log.error("airbase download failed: %s", exc)
+        log.error(
+            "airbase download failed: %s. Fall back to --from-dir with a manual "
+            "or Zenodo download, or use the CLI directly:\n"
+            "  airbase verified -c %s %s -F hourly --path %s",
+            exc, eea["country"],
+            " ".join(f"-p {p}" for p in eea["pollutants"]), dest,
+        )
         return None
 
 
 # ---------------------------------------------------------------------------
 # Route 2 — read whatever is on disk
 # ---------------------------------------------------------------------------
-def read_local_tree(root: Path, station_ids: set[str] | None = None) -> pd.DataFrame:
+def read_local_tree(root: Path, station_ids: set[str] | None = None,
+                    country: str = "ES") -> pd.DataFrame:
     """Read every .csv/.parquet (including inside .zip) under ``root``.
 
     Filtering to ``station_ids`` happens per file so a full-Spain download never
@@ -161,12 +160,24 @@ def read_local_tree(root: Path, station_ids: set[str] | None = None) -> pd.DataF
         )
 
     log.info("reading %d file(s) under %s", len(files), root)
+
+    # EEA's Parquet service omits the EoI code, so station identity has to come
+    # from the registry. Build the map once rather than per file.
+    try:
+        sp2eoi = sampling_point_to_eoi(country=country)
+        log.info("registry supplies %s SamplingPoint -> EoI mappings",
+                 f"{len(sp2eoi):,}")
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("no SamplingPoint -> EoI mapping available (%s); files that "
+                    "already carry an EoI code will still load", exc)
+        sp2eoi = {}
+
     frames: list[pd.DataFrame] = []
     skipped = 0
     for path in files:
         try:
             for chunk in _read_any(path):
-                chunk = _normalise_columns(chunk)
+                chunk = _normalise_columns(chunk, sp2eoi)
                 if station_ids is not None and "AirQualityStationEoICode" in chunk:
                     chunk = chunk[chunk["AirQualityStationEoICode"].isin(station_ids)]
                 if not chunk.empty:
@@ -208,9 +219,62 @@ def _read_any(path: Path):
                         yield pd.read_parquet(fh)
 
 
-def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+def sampling_point_to_eoi(country: str = "ES") -> dict[str, str]:
+    """``SamplingPoint -> AirQualityStationEoICode`` from the EEA registry.
+
+    Necessary because EEA's Parquet download service does **not** carry the EoI
+    code. Its ``Samplingpoint`` column looks like ``ES/SP_08019043_10_47``,
+    where ``08019043`` is the Spanish *national* station code, not the EoI code
+    this project keys everything on. The two are related only through the
+    registry, which publishes both columns — so the join below is the only
+    correct way to recover station identity, and parsing the string is not.
+    """
+    from src.data.station_metadata import load_registry
+
+    reg = load_registry(country=country)
+    if "SamplingPoint" not in reg.columns:
+        raise ValueError(
+            "the station registry has no SamplingPoint column, so EEA Parquet "
+            "rows cannot be resolved to stations. Re-download it with "
+            "`python -m src.data.station_metadata --refresh`."
+        )
+    pairs = reg[["SamplingPoint", "AirQualityStationEoICode"]].dropna()
+    return dict(zip(pairs["SamplingPoint"].astype(str),
+                    pairs["AirQualityStationEoICode"].astype(str)))
+
+
+def _resolve_station_ids(df: pd.DataFrame, sp2eoi: dict[str, str]) -> pd.DataFrame:
+    """Add ``AirQualityStationEoICode`` by joining ``SamplingPoint`` to the registry."""
+    if "AirQualityStationEoICode" in df.columns or "SamplingPoint" not in df.columns:
+        return df
+    if not sp2eoi:
+        raise ValueError(
+            "EEA Parquet rows carry SamplingPoint but no EoI code, and no "
+            "registry mapping was supplied. See sampling_point_to_eoi()."
+        )
+    # Values are namespaced as "<country>/<sampling point>"; the registry keys
+    # on the bare sampling point.
+    bare = df["SamplingPoint"].astype(str).str.rsplit("/", n=1).str[-1]
+    df = df.copy()
+    df["AirQualityStationEoICode"] = bare.map(sp2eoi)
+    unresolved = df["AirQualityStationEoICode"].isna()
+    if unresolved.all():
+        raise ValueError(
+            f"no SamplingPoint resolved to a station; first unmatched value: "
+            f"{bare.iloc[0]!r}. The registry may be stale."
+        )
+    if unresolved.any():
+        log.warning("%d row(s) had an unmatched SamplingPoint and were dropped",
+                    int(unresolved.sum()))
+        df = df[~unresolved]
+    return df
+
+
+def _normalise_columns(df: pd.DataFrame,
+                       sp2eoi: dict[str, str] | None = None) -> pd.DataFrame:
     """Rename known aliases onto the CLAUDE.md §3.1 schema and derive what we can."""
     df = df.rename(columns={k: v for k, v in _COLUMN_ALIASES.items() if k in df.columns})
+    df = _resolve_station_ids(df, sp2eoi or {})
 
     # Recover AirPollutant from AirPollutantCode when only the code is present.
     if "AirPollutant" not in df.columns and "AirPollutantCode" in df.columns:
@@ -252,15 +316,16 @@ def fetch(from_dir: str | None = None, demo: bool = False,
         return generate_demo_raw(cfg)
 
     station_ids = {s.station_id for s in configured_stations()}
+    country = cfg["eea"]["country"]
 
     if from_dir is not None:
-        return read_local_tree(Path(from_dir), station_ids)
+        return read_local_tree(Path(from_dir), station_ids, country=country)
 
     raw_dir = paths["raw"] / "eea"
     if use_airbase and not any(raw_dir.rglob("*")):
         fetch_via_airbase(raw_dir, cfg)
 
-    return read_local_tree(raw_dir, station_ids)
+    return read_local_tree(raw_dir, station_ids, country=country)
 
 
 def main() -> None:
