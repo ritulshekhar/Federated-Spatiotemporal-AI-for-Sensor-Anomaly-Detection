@@ -114,28 +114,81 @@ def harmonize_eea(
 def harmonize_cpcb(
     df: pd.DataFrame,
     station_class_map: dict[str, str] | None = None,
+    station_prefix: str = "IN-OAQ-",
 ) -> pd.DataFrame:
-    """CPCB raw schema -> common schema. Phase 3 only (CLAUDE.md §3.2, §5.1).
+    """CPCB (via OpenAQ) raw schema -> common schema. Phase 3 (§3.2, §5.1).
 
-    !! UNVERIFIED !! CLAUDE.md §11 records this as an open risk: CPCB's export
-    column names, units, and whether ``pollutant_avg`` is hourly or some other
-    aggregation have NOT been checked against a real downloaded sample. Confirm
-    before trusting this mapping.
+    Schema VERIFIED 2026-09-16 against a real OpenAQ archive object, which
+    closes the §11 open risk for this route. Observed columns:
 
-    ``label`` is left None here on purpose. CPCB has no Validity equivalent, so
-    every fault label on this data is synthetic and gets attached later by the
-    rate-matched injector in ``src/preprocessing/fault_labels.py`` (§5.5) —
-    never by inventing one at harmonization time.
+        location_id | sensors_id | location | datetime | lat | lon |
+        parameter | units | value
+
+    Two differences from the sketch in CLAUDE.md §5.1, which assumed the
+    ``data.gov.in`` export:
+
+    * ``datetime`` is already ISO-8601 **with a UTC offset**, so it converts
+      directly. The §5.1 sketch localises a naive timestamp to Asia/Kolkata
+      first; doing that here would shift every reading by +5:30.
+    * ``parameter`` is a lowercase name (``pm25``, ``no2``), not a numeric id.
+
+    ``label`` is None on purpose and this is LOCKED (§2.6): CPCB has no
+    Validity equivalent, so every fault label on this data is synthetic and is
+    attached later by the rate-matched injector in
+    ``src/preprocessing/fault_labels.py``, at the rate measured from real EEA
+    data (§5.5) — never invented at harmonization time.
     """
+    from src.data.fetch_cpcb import PARAMETER_MAP, REQUIRED_ARCHIVE_COLUMNS
+
     if station_class_map is None:
         station_class_map = {}
 
-    raise NotImplementedError(
-        "harmonize_cpcb is a Phase 3 stretch goal and its column mapping is "
-        "unverified against a real CPCB export (CLAUDE.md §11). Do not enable "
-        "cpcb in configs/data.yaml until a real sample has been inspected. "
-        "The intended mapping is documented in CLAUDE.md §5.1."
-    )
+    missing = [c for c in REQUIRED_ARCHIVE_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"OpenAQ archive schema drifted: missing {missing}, got "
+            f"{list(df.columns)}. Re-run "
+            "`python -m src.data.fetch_cpcb --inspect <location_id>` and update "
+            "the mapping and REQUIRED_ARCHIVE_COLUMNS together (§11)."
+        )
+
+    ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce", format="mixed")
+    pollutant = df["parameter"].astype(str).str.strip().str.lower().map(PARAMETER_MAP)
+
+    unmapped = sorted(set(df.loc[pollutant.isna(), "parameter"].astype(str).unique()))
+    if unmapped:
+        log.info("dropping %d OpenAQ parameter(s) outside this project's "
+                 "pollutant set: %s", len(unmapped), unmapped[:8])
+
+    station_id = station_prefix + df["location_id"].astype(str)
+
+    out = pd.DataFrame({
+        "station_id": station_id,
+        "region": "india",
+        "timestamp_utc": ts,
+        "pollutant": pollutant,
+        "concentration": pd.to_numeric(df["value"], errors="coerce"),
+        "unit": df["units"].astype(str),
+        # LOCKED (§2.6): no Validity equivalent exists, so there is no real
+        # label to assign. Left missing rather than defaulted to "trustworthy".
+        "label": None,
+        "label_source": "synthetic",
+        "station_class": station_id.map(station_class_map).fillna("unknown"),
+        "validity": pd.Series(pd.NA, index=df.index, dtype="Int64"),
+        "verification": pd.Series(pd.NA, index=df.index, dtype="Int64"),
+    })
+
+    out = out[ts.notna() & pollutant.notna()].copy()
+    if out.empty:
+        raise ValueError(
+            "no CPCB rows survived harmonization — every timestamp or pollutant "
+            "failed to parse. Inspect the raw export before continuing."
+        )
+    out = _canonicalise_units(out)
+    log.info("CPCB/OpenAQ: %s rows, %d station(s), pollutants %s",
+             f"{len(out):,}", out["station_id"].nunique(),
+             sorted(out["pollutant"].unique()))
+    return _finalise(out)
 
 
 # ---------------------------------------------------------------------------
