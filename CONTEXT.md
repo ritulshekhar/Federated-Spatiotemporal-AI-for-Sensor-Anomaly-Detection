@@ -234,3 +234,159 @@ so the seasonal-naive and left-NaN imputation branches actually run.
    episodes, the exact behaviour rung 6 has to beat. The number itself doesn't
    mean anything yet (simulated data), but it confirms the control column
    works.
+
+---
+
+## [2026-09-16] entry 3 — real EEA data, and the India route
+
+Pushed to GitHub for the first time:
+`https://github.com/Skandy1212/Federated-Spatiotemporal-AI-for-sensor-anomaly-detection`
+(branch `master`).
+
+### Station codes: verified, and several classes were wrong
+
+`python -m src.data.station_metadata --refresh --print` downloaded the EEA
+registry (26.9 MB). **All ten configured EoI codes are real**, which was lucky
+rather than earned. But the registry contradicted five of my `station_class`
+guesses, and those are now corrected from its own area × type:
+
+| Station | I guessed | Registry says |
+|---|---|---|
+| ES1396A | urban_traffic | **urban_background** |
+| ES1856A | urban_traffic | **urban_background** |
+| ES1480A | urban_background | **urban_traffic** |
+| ES1992A | suburban_background | **urban_background** |
+| ES0559A | urban_industrial | **urban_traffic** |
+
+Two things the registry export does *not* have: a station-name column (so the
+`name:` fields in `configs/data.yaml` stay unverified labels) and any notion of
+municipality except through `AirQualityStationNatCode`, whose first five digits
+are the INE code — 08019 Barcelona, 08015 Badalona, 08211 Sant Adrià. My
+`stations_in_city()` had been matching the string "Barcelona" against a numeric
+column, which is why it returned zero rows while every code was in fact present.
+
+### Only 7 of 10 stations are usable
+
+ES2027A, ES1362A and ES0559A report no NO2 (the configured target), and
+ES1362A's sampling point closed on 2017-12-31. They are also outside EEA's
+"Barcelona" city filter. The working node set is therefore **7 stations**, all
+in Barcelona municipality. Switching `target_pollutant` to PM10 would give 9,
+which is worth revisiting when the graph layer wants more nodes.
+
+### airbase 1.0.0 is not the API CLAUDE.md documents
+
+§3.1 records the 0.x call. The installed 1.0.0 is
+`client.request("Verified", "ES", poll=[...])` → `r.download(dir=...)`, and its
+dataset vocabulary matters a great deal:
+
+- `Historical` — data delivered **2002–2012**. My 1.x fallback was passing this,
+  which would have quietly fetched the wrong era entirely.
+- `Verified` — **E1a**. The only acceptable value.
+- `Unverified` — E2a, LOCKED out by §2/§3.1.
+
+`request()` takes no year arguments, so `year_from`/`year_to` are now a
+post-download filter (`harmonize.filter_years`). Restricting to the Barcelona
+urban area cut the download from ~2.2 GB to ~58 MB (61 files).
+
+### EEA's Parquet download has no EoI code
+
+The real schema is `Samplingpoint, Pollutant, Start, End, Value, Unit, AggType,
+Validity, Verification, ResultTime, DataCapture, FkObservationLog`.
+`Samplingpoint` looks like `ES/SP_08019043_10_47`, where `08019043` is the
+*Spanish national* code. It relates to the EoI code only through the registry,
+so `fetch_eea.sampling_point_to_eoi()` joins the two — parsing the string would
+not work. Resolves 61/61 files.
+
+### The finding that matters most: labels start in 2017
+
+`label_coverage_by_year()` was written to check this and immediately earned its
+place. EEA's Catalonia delivery carries **zero negative Validity codes before
+2017** — 477,114 rows, every one flagged valid — then 2.3–4.3% faults every
+year from 2017 onward. That is a reporting-practice change, not four
+fault-free years.
+
+Consequences, now baked into `configs/data.yaml` with the reasoning inline:
+- `year_from: 2017` (was 2013). Including the earlier years drops the measured
+  fault rate from **2.805% to 1.912%** and would teach the model that older
+  data never fails.
+- `year_to: 2024`. The service actually serves into 2025 — airbase's own docs
+  claiming 2013–2023 are stale — but only 2 of the 7 stations have 2025
+  coverage. 2024 is the last year complete across the node set.
+
+Other measured facts: every row is `Verification=1`, and the only Validity
+codes present are `1` and `-1`. **There is no `-99` anywhere in this node set**,
+so §3.1's "single most valuable label" — government-recorded maintenance —
+simply does not exist here. Any claim about distinguishing maintenance faults
+specifically cannot be made from this data.
+
+**Real fault rate = 0.02805.** This is the §5.5 target for synthetic injection
+and the first genuinely novel measurement in the project. Per station it ranges
+1.6% (ES1679A) to 4.6% (ES1992A).
+
+### A pipeline bug real data exposed
+
+ES1438A produced **zero** train and val windows. Cause: it added PM10 and PM2.5
+instruments in 2024, and since a window requires every feature column finite,
+all 48,892 pre-2024 training windows were silently dropped. The demo data could
+never have surfaced this because every simulated station reports everything
+from day one.
+
+Fix: `_prune_sparse_features()` drops an *exogenous* pollutant whose coverage
+inside the station's own training window is below `min_feature_coverage` (0.80).
+A pollutant that was not being measured during training cannot be a training
+feature. The target is never dropped — a station that cannot supply its own
+target is excluded outright instead. ES1438A now has its full 48,892 windows.
+
+### Physical screening on real data
+
+Worth recording as a diagnostic: **every negative reading is also a
+Validity-flagged fault** (984/984 at ES1679A, 1568/1568 at ES1856A, and so on).
+That confirms §3.1's claim that `Concentration` is retained when `Validity` is
+negative, which is the property the whole real-label approach depends on.
+
+Also: the flatline rule flags **75% of SO2** at ES1856A and 72% at ES1992A.
+Barcelona SO2 sits near the detection limit, so long runs of identical values
+are normal instrument behaviour, not a fault. The `flatline_run_length: 6` rule
+is miscalibrated for near-detection-limit pollutants. Not yet fixed — flagged
+here because it would badly distort any SO2-based result.
+
+### India / CPCB (out of §9 order, at the user's request)
+
+§9 puts this in Phase 3, after Phases 1 and 2 report numbers. Done early
+because it was asked for. It is acquisition and schema verification only —
+nothing is trained on it, and no LOCKED constraint is relaxed.
+
+Route: **OpenAQ**, which ingests CPCB as its India source. Of the §3.2 options
+it is the only one giving multi-year *hourly* per-pollutant data without
+scraping — `app.cpcbccr.com` is an undocumented internal API capped at about a
+week per request, and `data.gov.in` serves AQI-level min/max/avg, which is
+coarser than the structure this project needs.
+
+**Schema VERIFIED against a real archive object**, closing the §11 open risk:
+`location_id, sensors_id, location, datetime, lat, lon, parameter, units, value`.
+Two corrections to the §5.1 sketch, which had assumed the data.gov.in export:
+`datetime` already carries a UTC offset (localising it to Asia/Kolkata as §5.1
+does would shift every reading by **+5:30**), and `parameter` is a lowercase
+name, not a numeric id. `harmonize_cpcb` is now implemented rather than raising.
+
+The unit guard earned its keep here too: `read_archive_object` was decoding the
+gzip stream with the platform default (cp1252 on Windows) instead of UTF-8,
+turning `µg/m³` into mojibake. `_canonicalise_units` refused it rather than
+coercing — exactly what §3.1's unit trap is for.
+
+**Blocked on one thing:** a free `OPENAQ_API_KEY`
+(https://explore.openaq.org/register), needed *once* to map country → location
+ids. The bulk history download afterwards needs no credentials. Every keyless
+route was tested and failed: OpenAQ v3 returns 401, data.gov.in 400, OpenAQ v2
+is retired (410), and WAQI's demo token ignores the requested city and returns
+Shanghai regardless.
+
+### Open items
+
+1. ~~Station codes unverified~~ — **closed**, all 10 verified.
+2. ~~CPCB schema unverified~~ — **closed** for the OpenAQ route.
+3. EEA has no meteorology (entries 1–2, unchanged). `meteo.enabled` still false.
+4. **New:** no `-99` maintenance labels exist in this node set.
+5. **New:** the flatline screen is miscalibrated for near-detection-limit SO2.
+6. **New:** `target_pollutant: NO2` gives 7 stations; PM10 would give 9.
+7. **New:** Indian values need an OpenAQ API key.
