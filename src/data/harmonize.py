@@ -42,6 +42,32 @@ EEA_EXTRA = ["validity", "verification"]
 FAULT_VALIDITY_CODES = (-1, -99)
 VALID_VALIDITY_CODES = (1, 2, 3, 4)
 
+# ---------------------------------------------------------------------------
+# No-data sentinel
+# ---------------------------------------------------------------------------
+# MEASURED 2026-09-16, and it contradicts CLAUDE.md §3.1.
+#
+# §3.1 states: "Concentration is present even when Validity is negative — this
+# is what makes real fault labels possible." In the Catalonia E1a delivery that
+# is **false**. Every single Validity=-1 row, across all five pollutants
+# (15,263 NO2 / 7,205 SO2 / 5,109 O3 / 103 PM10 / 103 PM2.5), carries exactly
+# -999.0. Not one carries a real reading.
+#
+# Consequences, both handled here:
+#   1. Left in place, -999 is not a concentration but a catastrophic outlier.
+#      It dragged the NO2 scaler to mean -1.41 / std 180.03, against a true
+#      30.60 / 22.12, corrupting every normalized feature, lag and rolling
+#      statistic downstream.
+#   2. It makes "fault detection" against these labels trivial and vacuous —
+#      `value == -999` scores perfectly — while the research problem, a
+#      plausible-looking but wrong reading, is not represented at all.
+#
+# So the sentinel is converted to missing here, which routes it into §6.2's
+# imputation and marks it is_imputed, keeping it out of anomaly scoring. The
+# Validity-derived *label* is preserved regardless: the row really was flagged
+# faulty, we simply have no reading to adjudicate. See CONTEXT.md entry 4.
+SENTINEL_THRESHOLD = -99.0
+
 # CLAUDE.md §3.1 unit trap: everything is ug/m3 except CO, which is mg/m3.
 CANONICAL_UNITS = {
     "SO2": "ug/m3", "PM10": "ug/m3", "PM2.5": "ug/m3",
@@ -107,6 +133,7 @@ def harmonize_eea(
 
     out = out[ts.notna()].copy()
     out = _canonicalise_units(out)
+    out = _mask_sentinels(out)
     _report_unknown_validity(out)
     return _finalise(out)
 
@@ -210,6 +237,38 @@ def _canonicalise_units(df: pd.DataFrame) -> pd.DataFrame:
             "unit mismatch against the CLAUDE.md §3.1 table: "
             f"{pairs}. CO is mg/m3 and everything else is ug/m3 — this is the "
             "documented unit trap; resolve it explicitly rather than coercing."
+        )
+    return df
+
+
+def _mask_sentinels(df: pd.DataFrame) -> pd.DataFrame:
+    """Turn EEA's -999 no-data sentinel into a genuine missing value.
+
+    The ``label`` column is deliberately left untouched. The reading really was
+    flagged faulty; we simply have no value to adjudicate, which is a different
+    statement from "this reading was fine".
+    """
+    df = df.copy()
+    sentinel = df["concentration"] <= SENTINEL_THRESHOLD
+    n = int(sentinel.sum())
+    if not n:
+        return df
+
+    df.loc[sentinel, "concentration"] = pd.NA
+    labelled_fault = int((df.loc[sentinel, "label"] == "fault").sum())
+    log.warning(
+        "masked %s no-data sentinel(s) <= %.0f as missing (%.2f%% of rows); "
+        "%d of them were Validity-flagged faults. Contradicts CLAUDE.md §3.1 — "
+        "see the SENTINEL_THRESHOLD note.",
+        f"{n:,}", SENTINEL_THRESHOLD, 100 * n / len(df), labelled_fault,
+    )
+    if labelled_fault and labelled_fault == n:
+        log.warning(
+            "EVERY sentinel row is a Validity fault, and every Validity fault is "
+            "a sentinel. Against these labels 'fault detection' is just "
+            "missing-data detection: the readings the project exists to "
+            "adjudicate are absent, not wrong. Objective 4 cannot be evaluated "
+            "on real EEA labels alone — see CONTEXT.md entry 4."
         )
     return df
 
