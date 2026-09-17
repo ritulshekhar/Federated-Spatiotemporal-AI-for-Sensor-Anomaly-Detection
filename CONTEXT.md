@@ -390,3 +390,106 @@ Shanghai regardless.
 5. **New:** the flatline screen is miscalibrated for near-detection-limit SO2.
 6. **New:** `target_pollutant: NO2` gives 7 stations; PM10 would give 9.
 7. **New:** Indian values need an OpenAQ API key.
+
+---
+
+## [2026-09-16] entry 4 — the −999 sentinel, and why Objective 4 cannot be evaluated on real EEA labels
+
+**This is the most consequential finding so far. It contradicts a premise
+CLAUDE.md states as fact, and it changes what Phase 2 can claim.**
+
+### The claim, and the measurement
+
+CLAUDE.md §3.1, on the `Concentration` column:
+
+> "Present even when Validity is negative — **this is what makes real fault
+> labels possible.**"
+
+That is false for the Catalonia E1a delivery. Measured across 2017–2024:
+
+| Pollutant | Validity=−1 rows | fraction equal to −999.0 |
+|---|---|---|
+| NO2 | 15,263 | **100.00%** |
+| SO2 | 7,205 | **100.00%** |
+| O3 | 5,109 | **100.00%** |
+| PM10 | 103 | **100.00%** |
+| PM2.5 | 103 | **100.00%** |
+
+Every invalid row carries the no-data sentinel −999.0. **Not one carries a real
+reading.** The relationship is also exactly biconditional: every sentinel is a
+Validity fault, and every Validity fault is a sentinel.
+
+### Consequence 1 (mechanical): every earlier real-data number was corrupt
+
+−999 was flowing through as if it were a concentration. It dragged the NO2
+scaler to **mean −1.41 / std 180.03** against a true **30.60 / 22.12** — so
+every normalized feature, every lag, and every rolling statistic was distorted,
+and the model spent its capacity trying to predict −999 spikes. That is why the
+first run's RMSE (70–160 µg/m³) sat at roughly 6× its MAE (13–42) for a
+pollutant whose clean mean is 30.6 and whose clean maximum is 233.
+
+`harmonize._mask_sentinels` now converts the sentinel to missing, which routes
+it into §6.2's imputation and marks it `is_imputed`. The Validity-derived label
+is deliberately preserved: the row really was flagged faulty, we simply have no
+reading to adjudicate. **The first `phase1_catalonia` run is superseded and
+none of its numbers should be quoted.**
+
+### Consequence 2 (conceptual): the central objective is not evaluable here
+
+Objective 4 — the one §1 calls CENTRAL, the one the rest of the system exists
+to serve — is to take an *anomalous reading* and decide whether it is a real
+event or a sensor fault. That presupposes a reading exists to judge.
+
+With this data there is none. Checked directly across all 7 stations:
+
+| | test windows | fault targets | fault **and** imputed | fault **and** evaluable |
+|---|---|---|---|---|
+| all 7 stations | 69,527 | 7,106 | 7,106 | **0** |
+
+Since §6.2 excludes imputed points from anomaly scoring — correctly, so the
+detector never flags its own interpolation — **zero fault labels remain
+evaluable**. The anomaly half of the report is necessarily empty.
+
+And before the fix, when the sentinels were still present, the task was not
+hard but vacuous: `value == -999` would score perfect precision and recall,
+whereas the residual detector managed AUC-PR 0.67–0.83. **A trivial equality
+check beat the model, because the task as posed was trivial.** Those apparently
+respectable AUC-PR numbers were detecting a sentinel, not a fault.
+
+### What this means
+
+EEA's `Validity` flag marks *"data absent or invalid"*, not *"data present but
+wrong"*. The interesting case — a plausible-looking reading that is
+nevertheless incorrect, which is precisely what Ferrer-Cid (2022) and Gupchup
+(2019) are about — **is not represented in these labels at all**.
+
+This collides with LOCKED decision §2.1, which makes real `Validity` labels the
+primary evaluation ground truth and demotes synthetic injection to "a
+supplementary stress test, never the headline metric". On this dataset that
+ordering cannot be honoured, because the primary ground truth contains no
+evaluable positives.
+
+Not resolved unilaterally — it touches a LOCKED decision, so it is the user's
+call. The options, as put to them:
+
+- **A.** Make rate-matched synthetic injection the primary evaluation for
+  Objective 4, with the real `Validity` labels kept as an honest
+  data-availability baseline. The injector already exists and is anchored to
+  the *measured* real rate (0.02805), so this is not an arbitrary simulation.
+  Requires amending §2.1.
+- **B.** Source real labels that do contain plausible-but-wrong readings —
+  co-located reference-vs-low-cost-sensor datasets are the usual route, and are
+  what Ferrer-Cid (2022) used.
+- **C.** Reframe Objective 4 around what EEA labels genuinely support.
+
+Worth noting for whoever picks this up: the `demo_source.py` generator written
+in entry 1 produces faults that *do* carry plausible corrupted values (stuck,
+spike, bias, noise). That is the regime the project needs and, as it turns out,
+the regime the real data does not supply.
+
+### What survives
+
+The forecasting half is unaffected by the conceptual problem and is now
+computed on clean data. The federated architecture, the privacy contract, the
+per-station discipline and the no-pooling reporting are all untouched. What
+needs rethinking is specifically how Objective 4 gets evaluated.
