@@ -44,13 +44,27 @@ def data_paths() -> dict[str, Path]:
     return out
 
 
-def station_dir(station_id: str, kind: str = "processed") -> Path:
+def station_dir(station_id: str, kind: str = "processed",
+                variant: str = "") -> Path:
     """Per-station output directory. Stations are never written to one shared file.
 
     CLAUDE.md §2.2 / §6: the pipeline runs independently per station and the
     on-disk layout mirrors that, so a "just concatenate the folder" shortcut is
     never the path of least resistance.
+
+    ``variant`` separates processed builds of the same stations — notably the
+    clean build from the rate-matched synthetic-injection build (§2.1a), which
+    must never overwrite each other since one is the forecasting reference and
+    the other the Objective 4 ground truth.
     """
-    d = data_paths()[kind] / station_id
+    base = data_paths()[kind]
+    d = (base / variant / station_id) if variant else (base / station_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def variant_root(kind: str = "processed", variant: str = "") -> Path:
+    base = data_paths()[kind]
+    d = base / variant if variant else base
     d.mkdir(parents=True, exist_ok=True)
     return d

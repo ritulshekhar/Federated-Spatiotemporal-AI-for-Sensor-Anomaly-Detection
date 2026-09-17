@@ -32,8 +32,12 @@ impossible to evaluate honestly, the classification wins.
    station and per horizon (never pooled into one number).
 4. **[CENTRAL]** Classify each anomalous reading (flagged by forecast residual) as **trustworthy**
    or **sensor-faulty**, using cross-node spatial agreement computed without sharing raw data.
-5. Evaluate the classifier primarily against real per-reading fault labels (EEA Validity flags);
-   synthetic fault injection is a supplementary stress test only, never the primary evaluation.
+5. Evaluate the classifier primarily against rate-matched synthetic faults injected at real
+   `Validity` episode durations, and report real `Validity` labels alongside as a
+   data-availability baseline. **AMENDED 2026-09-17 — see §2.1a.** (Originally: evaluate primarily
+   against real per-reading fault labels, with synthetic injection supplementary only. That is not
+   possible on this dataset: every Validity-flagged row carries the −999 no-data sentinel rather
+   than a reading, so there is nothing to classify. CONTEXT.md entry 4.)
 6. Compare federated vs. centralised training on accuracy, communication cost, and privacy, using
    the baseline ladder in §9.1.
 7. Build a dashboard visualising station data, forecasts, and the trustworthy/faulty decision.
@@ -54,10 +58,40 @@ relevant, don't restate the argument from scratch.
 These were each chosen to prevent a specific, previously-identified failure mode. If you think one
 should change, flag it explicitly rather than silently deviating.
 
-1. **Real fault labels (EEA `Validity` ∈ {-1, -99}) are the primary evaluation ground truth.**
-   Synthetic fault injection (stuck-at, drift, spike, noise, dropout, bias) is a *supplementary*
+1. **~~Real fault labels (EEA `Validity` ∈ {-1, -99}) are the primary evaluation ground truth.~~**
+   **AMENDED 2026-09-17 by the project owner. Superseded — see 1a below.**
+
+   ~~Synthetic fault injection (stuck-at, drift, spike, noise, dropout, bias) is a *supplementary*
    stress test for fault subtypes Validity doesn't finely distinguish (e.g. slow drift) — never the
-   headline metric.
+   headline metric.~~
+
+   *Why this was amended, kept here so the original reasoning is not lost:* the rule assumed §3.1's
+   claim that `Concentration` survives a negative `Validity` flag. It does not. Measured across the
+   Catalonia E1a delivery, 2017–2024, **all 27,783 Validity-flagged rows across all five pollutants
+   carry exactly the −999 no-data sentinel** — the relation is biconditional, every sentinel is a
+   fault and every fault is a sentinel. Those rows are therefore imputed by §6.2 and excluded from
+   anomaly scoring, leaving **0 of 7,106 fault targets evaluable**. §2.1 named a primary ground
+   truth containing nothing to measure. Full evidence in CONTEXT.md entry 4.
+
+1a. **Rate-matched synthetic fault injection is the primary evaluation ground truth for
+   Objective 4.** Real `Validity` labels remain reported, as an honest *data-availability*
+   baseline — they record when an instrument failed, not what a wrong reading looks like.
+
+   Three constraints keep this from becoming an arbitrary simulation, and all three are LOCKED:
+
+   - **The injection rate matches the measured real rate** — `real_fault_rate = 0.02805`,
+     measured, never a default. This is §2.7, unchanged and now load-bearing.
+   - **Episode durations are sampled from the real `Validity` episode-duration distribution.**
+     EEA's flags genuinely record *when* instruments fail and *for how long*; only the corrupted
+     value itself is synthesised. Use the real data for what it actually evidences.
+   - **`label_source` stays "synthetic" and is never blended with "real".** §5.3 and §8.3 are
+     unchanged: both numbers are reported, separately, always.
+
+   *What this costs, stated plainly rather than buried:* the headline for Objective 4 becomes
+   "evaluated on realistic synthetic faults", which is weaker against the §1.2 novelty claim than
+   real labels would have been. Sourcing labels that genuinely contain plausible-but-wrong
+   readings — co-located reference-vs-low-cost-sensor data, as Ferrer-Cid et al. (2022) used in
+   Barcelona — remains the stronger option and is the recommended stretch goal.
 2. **Never pool across regions/stations into one blended dataset with one shared threshold or one
    shared normalization scaler.** Every station normalizes on its own training window. Every result
    is reported per-station and per-region — never as one pooled accuracy number. This prevents a

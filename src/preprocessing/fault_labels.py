@@ -67,12 +67,37 @@ class InjectionReport:
     n_injected: int
     n_eligible: int
     n_episodes: int
+    duration_source: str = "type_defaults"
+    n_real_episodes: int = 0
+    median_real_duration_h: float = float("nan")
     by_type: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "by_type"}
         d.update({f"n_{t}": self.by_type.get(t, 0) for t in FAULT_TYPES})
         return d
+
+
+def real_episode_durations(frame: pd.DataFrame, pollutant: str) -> np.ndarray:
+    """Lengths, in hours, of each real `Validity`-flagged fault episode.
+
+    LOCKED by §2.1a. EEA's flags cannot tell us what a wrong reading *looks
+    like* — the value is always the -999 sentinel — but they do genuinely record
+    **when** an instrument failed and **for how long**. That part is real
+    operator-recorded evidence, so the injector samples its episode durations
+    from this distribution instead of from invented per-type ranges. Only the
+    corrupted value itself is synthesised.
+    """
+    col = pollutant + LABEL_SUFFIX
+    if col not in frame.columns:
+        return np.empty(0, dtype=int)
+    is_fault = (frame[col] == "fault").to_numpy()
+    if not is_fault.any():
+        return np.empty(0, dtype=int)
+
+    padded = np.concatenate(([False], is_fault, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    return (edges[1::2] - edges[0::2]).astype(int)
 
 
 def measured_rate_from(labels: pd.Series | np.ndarray) -> float:
@@ -95,6 +120,7 @@ def inject_faults(
     types: tuple[str, ...] = FAULT_TYPES,
     seed: int = 1337,
     max_attempts_factor: int = 8,
+    use_real_durations: bool = True,
 ) -> tuple[pd.DataFrame, InjectionReport]:
     """Inject rate-matched synthetic faults into ``pollutant``, in place on a copy.
 
@@ -137,26 +163,57 @@ def inject_faults(
     by_type: dict[str, int] = {t: 0 for t in types}
     n_episodes = 0
 
-    attempts = 0
-    max_attempts = max(budget, 1) * max_attempts_factor
-    while injected.sum() < budget and attempts < max_attempts:
-        attempts += 1
-        kind = str(rng.choice(types))
+    # §2.1a: prefer the real Validity episode-duration distribution over the
+    # invented per-type ranges.
+    real_durations = real_episode_durations(frame, pollutant) if use_real_durations \
+        else np.empty(0, dtype=int)
+    duration_source = "real_validity_episodes" if real_durations.size else "type_defaults"
+    if use_real_durations and not real_durations.size:
+        log.warning(
+            "%s/%s | no real Validity episodes to sample durations from; falling "
+            "back to the invented per-type ranges. Say so in any write-up.",
+            station_id, pollutant,
+        )
+
+    # Budget is split evenly *by row count* across fault types, not by episode
+    # count. Picking a type per episode instead lets drift swallow the run: its
+    # 72h floor is far above the real median episode length (2h in Catalonia),
+    # so uniform episode selection gave drift ~63% of injected rows and left
+    # spike with 1.5%. Per-type budgets guarantee every subtype is present in
+    # useful numbers, which is what makes per-subtype detection rates (§6.7)
+    # reportable at all.
+    per_type_budget = {t: budget // len(types) for t in types}
+    for t in list(types)[: budget % len(types)]:
+        per_type_budget[t] += 1
+
+    for kind in types:
         lo, hi = _DURATION_HOURS[kind]
-        duration = int(rng.integers(lo, hi + 1))
-        remaining = budget - int(injected.sum())
-        duration = min(duration, max(remaining, 1))
-        start = int(rng.integers(0, max(n - duration, 1)))
-        span = slice(start, start + duration)
+        attempts = 0
+        max_attempts = max(per_type_budget[kind], 1) * max_attempts_factor
+        while by_type[kind] < per_type_budget[kind] and attempts < max_attempts:
+            attempts += 1
+            if real_durations.size:
+                # A real episode length, floored at what the type needs to be
+                # itself: a 2h "drift" is indistinguishable from a bias step,
+                # and a 40h "spike" is not a spike.
+                sampled = int(rng.choice(real_durations))
+                duration = int(np.clip(sampled, lo,
+                                       hi if kind == "spike" else max(hi, sampled)))
+            else:
+                duration = int(rng.integers(lo, hi + 1))
+            remaining = per_type_budget[kind] - by_type[kind]
+            duration = min(duration, max(remaining, 1))
+            start = int(rng.integers(0, max(n - duration, 1)))
+            span = slice(start, start + duration)
 
-        if not eligible[span].all() or injected[span].any():
-            continue
+            if not eligible[span].all() or injected[span].any():
+                continue
 
-        values[span] = _apply_fault(kind, values[span], values, eligible, rng)
-        injected[span] = True
-        fault_type[span] = kind
-        by_type[kind] += duration
-        n_episodes += 1
+            values[span] = _apply_fault(kind, values[span], values, eligible, rng)
+            injected[span] = True
+            fault_type[span] = kind
+            by_type[kind] += duration
+            n_episodes += 1
 
     achieved = float(injected.sum() / n_eligible)
     if injected.sum() < budget:
@@ -178,12 +235,18 @@ def inject_faults(
         station_id=station_id, pollutant=pollutant,
         target_rate=round(target_rate, 6), achieved_rate=round(achieved, 6),
         n_injected=int(injected.sum()), n_eligible=n_eligible,
-        n_episodes=n_episodes, by_type=by_type,
+        n_episodes=n_episodes, duration_source=duration_source,
+        n_real_episodes=int(real_durations.size),
+        median_real_duration_h=(float(np.median(real_durations))
+                                if real_durations.size else float("nan")),
+        by_type=by_type,
     )
     log.info(
-        "%s/%s | injected %d rows in %d episode(s), rate %.4f (target %.4f): %s",
+        "%s/%s | injected %d rows in %d episode(s), rate %.4f (target %.4f), "
+        "durations from %s (%d real episodes, median %.0fh): %s",
         station_id, pollutant, rep.n_injected, rep.n_episodes, achieved,
-        target_rate, {k: v for k, v in by_type.items() if v},
+        target_rate, duration_source, rep.n_real_episodes,
+        rep.median_real_duration_h, {k: v for k, v in by_type.items() if v},
     )
     return frame, rep
 

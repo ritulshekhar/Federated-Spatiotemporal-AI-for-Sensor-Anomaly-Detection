@@ -43,7 +43,7 @@ from src.evaluation.report import build_report, make_records
 from src.preprocessing.normalize import LocalScaler
 from src.preprocessing.windowing import SPLITS, WindowSet, load_windows
 from src.utils.logging_setup import get_logger
-from src.utils.paths import data_paths, load_config, station_dir
+from src.utils.paths import load_config, station_dir, variant_root
 
 log = get_logger(__name__)
 
@@ -73,8 +73,8 @@ class StationData:
         return self.scaler.inverse_transform_column(y_pred_norm, self.target)
 
 
-def load_station(station_id: str) -> StationData:
-    d = station_dir(station_id, "processed")
+def load_station(station_id: str, variant: str = "") -> StationData:
+    d = station_dir(station_id, "processed", variant=variant)
     missing = [s for s in SPLITS if not (d / f"{s}.npz").exists()]
     if missing:
         raise FileNotFoundError(
@@ -89,15 +89,17 @@ def load_station(station_id: str) -> StationData:
     )
 
 
-def load_region(region: str) -> list[StationData]:
-    manifest_path = data_paths()["processed"] / f"run_manifest_{region}.json"
+def load_region(region: str, variant: str = "") -> list[StationData]:
+    manifest_path = variant_root("processed", variant) / f"run_manifest_{region}.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"{manifest_path} not found. Run the preprocessing pipeline for "
-            f"region {region!r} first."
+            f"region {region!r}"
+            + (f" with --inject-synthetic (variant {variant!r})" if variant else "")
+            + " first."
         )
     ids = json.loads(manifest_path.read_text(encoding="utf-8"))["stations_processed"]
-    return [load_station(sid) for sid in ids]
+    return [load_station(sid, variant=variant) for sid in ids]
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,8 @@ def score_station(station: StationData, model_name: str,
                   pred_val_norm: np.ndarray, pred_test_norm: np.ndarray,
                   extreme_quantile: float = 0.95,
                   threshold_method: str = "quantile",
-                  threshold_quantile: float = 0.98) -> tuple[pd.DataFrame, float]:
+                  threshold_quantile: float = 0.98,
+                  label_source: str = "auto") -> tuple[pd.DataFrame, float]:
     """Turn one station's forecasts into prediction records and a threshold.
 
     The threshold is calibrated on that station's **validation** split, never on
@@ -133,15 +136,27 @@ def score_station(station: StationData, model_name: str,
         reference=station.splits["train"].y_raw.ravel(),
     )
 
-    labels = np.where(test.target_label == 1, "fault",
-                      np.where(test.target_label == 0, "trustworthy", "unknown"))
+    # One label source per run, not both at once. Forecast error does not depend
+    # on which labels you score against, so emitting both would duplicate every
+    # forecast row under two label_source values — identical numbers, twice.
+    # Instead each processed variant carries one source: the injected variant is
+    # scored "synthetic" (the §2.1a primary ground truth) and the clean variant
+    # "real" (the data-availability baseline). Both are reported, from their own
+    # run, and §8.3's grouping keeps them apart.
+    source = label_source
+    if source == "auto":
+        source = "synthetic" if test.target_synthetic_label is not None else "real"
+
+    codes = test.labels_for(source)
+    labels = np.where(codes == 1, "fault",
+                      np.where(codes == 0, "trustworthy", "unknown"))
 
     records = make_records(
         model=model_name,
         station_id=station.station_id,
         region=test.region,
         station_class=test.station_class,
-        label_source=test.label_source,
+        label_source=source,
         t_target=test.t_target,
         y_true=test.y_raw,
         y_pred=test_pred_raw,
@@ -313,7 +328,8 @@ def rung6_proposed(*_args, **_kwargs):
 
 # ---------------------------------------------------------------------------
 def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
-               out_name: str | None = None) -> Path:
+               out_name: str | None = None, variant: str = "",
+               label_source: str = "auto") -> Path:
     """Run the Phase 1 rungs over one region and write one grouped report."""
     data_cfg = load_config("data")
     model_cfg = load_config("model")
@@ -321,12 +337,14 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
     dec = model_cfg["decision_layer"]["residual_threshold"]
     seed = model_cfg.get("seed", 1337)
 
-    stations = load_region(region)
-    log.info("loaded %d station(s) for region %r", len(stations), region)
+    stations = load_region(region, variant=variant)
+    log.info("loaded %d station(s) for region %r (variant %r)", len(stations),
+             region, variant or "clean")
 
     score_kwargs = {
         "threshold_method": dec["method"],
         "threshold_quantile": dec["quantile"],
+        "label_source": label_source,
     }
 
     all_records, all_thresholds, extras = [], {}, {}
@@ -361,6 +379,8 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         horizons=horizons,
         meta={
             "region": region,
+            "variant": variant or "clean",
+            "label_source": label_source,
             "rungs": list(rungs),
             "seed": seed,
             "n_stations": len(stations),
@@ -387,6 +407,12 @@ def main() -> None:
     ap.add_argument("--rungs", nargs="*", type=int, default=[1, 2, 3],
                     help="which ladder rungs to run (Phase 1 supports 1 2 3)")
     ap.add_argument("--name", default=None, help="report directory name")
+    ap.add_argument("--variant", default="",
+                    help="processed build to score, e.g. 'injected' (§2.1a)")
+    ap.add_argument("--label-source", default="auto",
+                    choices=["auto", "real", "synthetic"],
+                    help="ground truth for the anomaly table; 'auto' picks "
+                         "synthetic when the build has it")
     args = ap.parse_args()
 
     unsupported = [r for r in args.rungs if r not in (1, 2, 3)]
@@ -397,7 +423,8 @@ def main() -> None:
         )
 
     seed_everything(load_config("model").get("seed", 1337))
-    out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name)
+    out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name,
+                     variant=args.variant, label_source=args.label_source)
     print(f"\nreport -> {out}")
 
 

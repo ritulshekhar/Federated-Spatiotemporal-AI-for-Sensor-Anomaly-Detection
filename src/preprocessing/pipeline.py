@@ -46,7 +46,7 @@ from src.preprocessing.windowing import (
     compute_split_boundaries, make_windows, save_windows,
 )
 from src.utils.logging_setup import get_logger
-from src.utils.paths import data_paths, load_config, station_dir
+from src.utils.paths import load_config, station_dir, variant_root
 
 log = get_logger(__name__)
 
@@ -59,6 +59,7 @@ def process_station(
     synthetic_rate: float | None = None,
     meteo: pd.DataFrame | None = None,
     write: bool = True,
+    variant: str = "",
 ) -> dict:
     """Full §6 pipeline for one station. Returns its manifest."""
     pre = cfg["preprocessing"]
@@ -166,8 +167,14 @@ def process_station(
         "observed_fraction": round(observed_fraction, 4),
         "split_boundaries": boundaries.as_dict(),
         "windows": {s: len(w) for s, w in windows.items()},
+        "variant": variant or "clean",
         "fault_rate_by_split": {
-            s: (None if np.isnan(w.fault_rate()) else round(w.fault_rate(), 6))
+            s: (None if np.isnan(w.fault_rate("real")) else round(w.fault_rate("real"), 6))
+            for s, w in windows.items()
+        },
+        "synthetic_fault_rate_by_split": {
+            s: (None if np.isnan(w.fault_rate("synthetic"))
+                else round(w.fault_rate("synthetic"), 6))
             for s, w in windows.items()
         },
         "coverage": [c.as_dict() for c in coverage],
@@ -177,7 +184,7 @@ def process_station(
     }
 
     if write:
-        out_dir = station_dir(station_id, "processed")
+        out_dir = station_dir(station_id, "processed", variant=variant)
         for ws in windows.values():
             save_windows(ws, out_dir)
         scaler.save(out_dir / "scaler.json")   # LOCAL ONLY — never uploaded
@@ -226,10 +233,16 @@ def _prune_sparse_features(frame: pd.DataFrame, present: list[str], target: str,
 
 
 def run(region: str, inject_synthetic: bool = False,
-        stations: list[str] | None = None, write: bool = True) -> pd.DataFrame:
+        stations: list[str] | None = None, write: bool = True,
+        variant: str | None = None) -> pd.DataFrame:
     """Process every station in ``region``. Returns a per-station summary table."""
     cfg = load_config("data")
     long_df = load_harmonized(region)
+
+    # Injected and clean builds must not overwrite each other: one is the
+    # forecasting reference, the other the Objective 4 ground truth (§2.1a).
+    if variant is None:
+        variant = "injected" if inject_synthetic else ""
 
     all_ids = sorted(long_df["station_id"].unique())
     ids = [s for s in (stations or all_ids)]
@@ -274,6 +287,7 @@ def run(region: str, inject_synthetic: bool = False,
             m = process_station(
                 long_df, sid, cfg, inject_synthetic=inject_synthetic,
                 synthetic_rate=synthetic_rate, meteo=meteo, write=write,
+                variant=variant,
             )
         except Exception as exc:  # noqa: BLE001 — one bad station must not stop the run
             log.error("%s | EXCLUDED: %s", sid, exc)
@@ -302,7 +316,8 @@ def run(region: str, inject_synthetic: bool = False,
             "meteo_enabled": meteo_enabled,
             "config": cfg["preprocessing"],
         }
-        path = data_paths()["processed"] / f"run_manifest_{region}.json"
+        run_manifest["variant"] = variant or "clean"
+        path = variant_root("processed", variant) / f"run_manifest_{region}.json"
         path.write_text(json.dumps(run_manifest, indent=2, default=str),
                         encoding="utf-8")
         log.info("wrote %s", path)
@@ -322,10 +337,14 @@ def main() -> None:
                     help="also inject rate-matched synthetic faults (§6.7). "
                          "Supplementary stress test only — never the headline metric.")
     ap.add_argument("--dry-run", action="store_true", help="do not write outputs")
+    ap.add_argument("--variant", default=None,
+                    help="processed-build subdirectory (default: 'injected' when "
+                         "--inject-synthetic is set, otherwise the clean root)")
     args = ap.parse_args()
 
     summary = run(args.region, inject_synthetic=args.inject_synthetic,
-                  stations=args.stations, write=not args.dry_run)
+                  stations=args.stations, write=not args.dry_run,
+                  variant=args.variant)
     print("\n=== preprocessing summary (per station — §8.3) ===")
     print(summary.to_string(index=False))
 

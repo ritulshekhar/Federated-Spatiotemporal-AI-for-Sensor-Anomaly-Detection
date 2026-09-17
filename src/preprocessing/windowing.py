@@ -34,6 +34,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.preprocessing.fault_labels import (
+    SYNTHETIC_LABEL_COL_SUFFIX, SYNTHETIC_TYPE_COL_SUFFIX,
+)
 from src.preprocessing.indexing import (
     IMPUTED_SUFFIX, LABEL_SUFFIX, PHYSICAL_SUFFIX, VERIFICATION_SUFFIX,
 )
@@ -84,10 +87,32 @@ class WindowSet:
     t0: np.ndarray           # (n,)  last input timestamp, datetime64[ns], UTC
     t_target: np.ndarray     # (n, horizon)  datetime64[ns], UTC
     target_is_imputed: np.ndarray    # (n, horizon) bool
-    target_label: np.ndarray         # (n, horizon) int8, see LABEL_* above
+    target_label: np.ndarray         # (n, horizon) int8, REAL Validity labels
     target_physical_flag: np.ndarray # (n, horizon) bool
     target_verification: np.ndarray  # (n, horizon) int8
     feature_columns: list[str]
+    # §2.1a — the primary Objective 4 ground truth. All LABEL_UNKNOWN when
+    # injection was not run, which is how `labels_for` tells the two apart.
+    target_synthetic_label: np.ndarray | None = None   # (n, horizon) int8
+    target_fault_type: np.ndarray | None = None        # (n, horizon) object
+
+    def labels_for(self, source: str) -> np.ndarray:
+        """Label array for ``source`` ("real" or "synthetic").
+
+        Keeping the two in separate arrays, reachable only by naming which one
+        you want, is what stops them being silently averaged (§5.3, §8.3).
+        """
+        if source == "real":
+            return self.target_label
+        if source == "synthetic":
+            if self.target_synthetic_label is None:
+                raise ValueError(
+                    f"{self.station_id}/{self.split}: no synthetic labels. Re-run "
+                    "the pipeline with --inject-synthetic (§2.1a makes these the "
+                    "primary Objective 4 ground truth)."
+                )
+            return self.target_synthetic_label
+        raise ValueError(f"unknown label source {source!r}; use 'real' or 'synthetic'")
 
     def __len__(self) -> int:
         return int(self.X.shape[0])
@@ -96,9 +121,13 @@ class WindowSet:
     def horizon(self) -> int:
         return int(self.y.shape[1])
 
-    def fault_rate(self) -> float:
-        known = self.target_label != LABEL_UNKNOWN
-        return float((self.target_label[known] == LABEL_FAULT).mean()) if known.any() else float("nan")
+    def fault_rate(self, source: str = "real") -> float:
+        try:
+            lab = self.labels_for(source)
+        except ValueError:
+            return float("nan")
+        known = lab != LABEL_UNKNOWN
+        return float((lab[known] == LABEL_FAULT).mean()) if known.any() else float("nan")
 
 
 def compute_split_boundaries(
@@ -161,7 +190,12 @@ def make_windows(
     verification = _column_or_default(
         frame, target + VERIFICATION_SUFFIX, n, 3, np.int8
     )
-    labels = _encode_labels(frame, target, n)
+    labels = _encode_labels(frame, target + LABEL_SUFFIX, n)
+    synth_col = target + SYNTHETIC_LABEL_COL_SUFFIX
+    has_synth = synth_col in frame.columns
+    synth_labels = _encode_labels(frame, synth_col, n) if has_synth else None
+    fault_types = (frame[target + SYNTHETIC_TYPE_COL_SUFFIX].to_numpy(dtype=object)
+                   if (target + SYNTHETIC_TYPE_COL_SUFFIX) in frame.columns else None)
 
     starts = np.arange(0, n - input_hours - horizon_hours + 1, stride, dtype=int)
 
@@ -191,6 +225,7 @@ def make_windows(
             frame, station_id, split, target, arr, X_all, y_all, y_raw_all,
             index, imputed, labels, physical, verification,
             input_hours, horizon_hours, feature_columns,
+            synth_labels, fault_types,
         )
 
     log.info(
@@ -205,7 +240,8 @@ def make_windows(
 # ---------------------------------------------------------------------------
 def _gather(frame, station_id, split, target, starts, X_all, y_all, y_raw_all,
             index, imputed, labels, physical, verification,
-            input_hours, horizon_hours, feature_columns) -> WindowSet:
+            input_hours, horizon_hours, feature_columns,
+            synth_labels=None, fault_types=None) -> WindowSet:
     n_feat = X_all.shape[1]
     if starts.size == 0:
         empty2 = np.empty((0, horizon_hours), dtype=np.float32)
@@ -224,6 +260,10 @@ def _gather(frame, station_id, split, target, starts, X_all, y_all, y_raw_all,
             target_physical_flag=np.empty((0, horizon_hours), dtype=bool),
             target_verification=np.empty((0, horizon_hours), dtype=np.int8),
             feature_columns=list(feature_columns),
+            target_synthetic_label=(np.empty((0, horizon_hours), dtype=np.int8)
+                                    if synth_labels is not None else None),
+            target_fault_type=(np.empty((0, horizon_hours), dtype=object)
+                               if fault_types is not None else None),
         )
 
     in_off = np.arange(input_hours)
@@ -251,6 +291,9 @@ def _gather(frame, station_id, split, target, starts, X_all, y_all, y_raw_all,
         target_physical_flag=physical[tgt_idx],
         target_verification=verification[tgt_idx],
         feature_columns=list(feature_columns),
+        target_synthetic_label=(synth_labels[tgt_idx]
+                                if synth_labels is not None else None),
+        target_fault_type=(fault_types[tgt_idx] if fault_types is not None else None),
     )
 
 
@@ -260,8 +303,7 @@ def _column_or_default(frame: pd.DataFrame, col: str, n: int, default, dtype):
     return np.full(n, default, dtype=dtype)
 
 
-def _encode_labels(frame: pd.DataFrame, target: str, n: int) -> np.ndarray:
-    col = target + LABEL_SUFFIX
+def _encode_labels(frame: pd.DataFrame, col: str, n: int) -> np.ndarray:
     if col not in frame.columns:
         return np.full(n, LABEL_UNKNOWN, dtype=np.int8)
     s = frame[col]
@@ -285,8 +327,14 @@ def save_windows(ws: WindowSet, directory: str | Path) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{ws.split}.npz"
+    optional = {}
+    if ws.target_synthetic_label is not None:
+        optional["target_synthetic_label"] = ws.target_synthetic_label
+    if ws.target_fault_type is not None:
+        optional["target_fault_type"] = ws.target_fault_type.astype(object)
     np.savez_compressed(
         path,
+        **optional,
         X=ws.X, y=ws.y, y_raw=ws.y_raw,
         t0=ws.t0.astype("datetime64[ns]").astype(np.int64),
         t_target=ws.t_target.astype("datetime64[ns]").astype(np.int64),
@@ -316,4 +364,8 @@ def load_windows(path: str | Path) -> WindowSet:
             target_physical_flag=z["target_physical_flag"],
             target_verification=z["target_verification"],
             feature_columns=[str(c) for c in z["feature_columns"]],
+            target_synthetic_label=(z["target_synthetic_label"]
+                                    if "target_synthetic_label" in z else None),
+            target_fault_type=(z["target_fault_type"]
+                               if "target_fault_type" in z else None),
         )
