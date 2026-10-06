@@ -132,7 +132,11 @@ def process_station(
                 "(§2.7/§5.5) — an arbitrary default lets the model learn "
                 "'region -> fault likelihood' as a shortcut."
             )
-        frame, rep = inject_faults(frame, target, target_rate=synthetic_rate)
+        frame, rep = inject_faults(
+            frame, target, target_rate=synthetic_rate,
+            # Train stays clean (§6.7). Only val and test receive faults.
+            eligible_after=boundaries.train_end,
+        )
         injection = rep.as_dict()
 
     # -- §6.4 ---------------------------------------------------------------

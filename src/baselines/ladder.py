@@ -38,7 +38,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import calibrate_threshold, extreme_mask, residual_score
+from src.evaluation.metrics import (
+    calibrate_threshold, extreme_mask, residual_score, volatility_scaled_score,
+)
 from src.evaluation.report import build_report, make_records
 from src.preprocessing.normalize import LocalScaler
 from src.preprocessing.windowing import SPLITS, WindowSet, load_windows
@@ -111,7 +113,10 @@ def score_station(station: StationData, model_name: str,
                   extreme_quantile: float = 0.95,
                   threshold_method: str = "quantile",
                   threshold_quantile: float = 0.98,
-                  label_source: str = "auto") -> tuple[pd.DataFrame, float]:
+                  label_source: str = "auto",
+                  score_mode: str = "volatility",
+                  volatility_floor: float = 0.25,
+                  target_fpr_extremes: float = 0.10) -> tuple[pd.DataFrame, float]:
     """Turn one station's forecasts into prediction records and a threshold.
 
     The threshold is calibrated on that station's **validation** split, never on
@@ -119,15 +124,40 @@ def score_station(station: StationData, model_name: str,
     """
     val, test = station.splits["val"], station.splits["test"]
     scale = station.target_scale
+    ti = station.target_index
 
-    val_score = residual_score(val.y_raw, station.y_pred_raw(pred_val_norm), scale)
+    # Volatility of the target over each window's own 24h input, in physical
+    # units. Known at forecast time, so using it leaks nothing.
+    val_vol = val.X[:, :, ti].std(axis=1) * scale
+    test_vol = test.X[:, :, ti].std(axis=1) * scale
+    vol_floor = volatility_floor * scale
+
+    val_pred_raw = station.y_pred_raw(pred_val_norm)
+    test_pred_raw = station.y_pred_raw(pred_test_norm)
+
+    if score_mode == "volatility":
+        val_score = volatility_scaled_score(
+            val.y_raw, val_pred_raw, val_vol[:, None], vol_floor)
+        test_score = volatility_scaled_score(
+            test.y_raw, test_pred_raw, test_vol[:, None], vol_floor)
+    elif score_mode == "absolute":
+        val_score = residual_score(val.y_raw, val_pred_raw, scale)
+        test_score = residual_score(test.y_raw, test_pred_raw, scale)
+    else:
+        raise ValueError(f"unknown score_mode {score_mode!r}")
+
+    val_codes = val.labels_for(label_source if label_source != "auto"
+                               else ("synthetic" if val.target_synthetic_label is not None
+                                     else "real"))
+    val_extreme = extreme_mask(
+        val.y_raw, quantile=extreme_quantile,
+        reference=station.splits["train"].y_raw.ravel(),
+    )
     threshold = calibrate_threshold(
         val_score, method=threshold_method, quantile=threshold_quantile,
-        mask=~val.target_is_imputed,
+        mask=~val.target_is_imputed, labels=val_codes, is_extreme=val_extreme,
+        target_fpr_extremes=target_fpr_extremes,
     )
-
-    test_pred_raw = station.y_pred_raw(pred_test_norm)
-    test_score = residual_score(test.y_raw, test_pred_raw, scale)
 
     # "Extreme" is defined on the TRAINING target, so the control does not move
     # with the test set it is meant to police.
@@ -147,26 +177,36 @@ def score_station(station: StationData, model_name: str,
     if source == "auto":
         source = "synthetic" if test.target_synthetic_label is not None else "real"
 
-    codes = test.labels_for(source)
-    labels = np.where(codes == 1, "fault",
-                      np.where(codes == 0, "trustworthy", "unknown"))
+    # Validation records are kept too, so a different scoring rule or threshold
+    # method can be calibrated and evaluated offline from records.parquet
+    # without retraining a single model.
+    frames = []
+    for split_name, ws, pred_raw, sc, vol, ext in (
+        ("val", val, val_pred_raw, val_score, val_vol, val_extreme),
+        ("test", test, test_pred_raw, test_score, test_vol, is_extreme),
+    ):
+        codes = ws.labels_for(source)
+        frames.append(make_records(
+            model=model_name,
+            station_id=station.station_id,
+            region=ws.region,
+            station_class=ws.station_class,
+            label_source=source,
+            split=split_name,
+            t_target=ws.t_target,
+            y_true=ws.y_raw,
+            y_pred=pred_raw,
+            is_imputed=ws.target_is_imputed,
+            label=np.where(codes == 1, "fault",
+                           np.where(codes == 0, "trustworthy", "unknown")),
+            fault_type=ws.target_fault_type,
+            is_extreme=ext,
+            local_volatility=vol,
+            score=sc,
+            horizons=list(range(1, ws.horizon + 1)),
+        ))
 
-    records = make_records(
-        model=model_name,
-        station_id=station.station_id,
-        region=test.region,
-        station_class=test.station_class,
-        label_source=source,
-        t_target=test.t_target,
-        y_true=test.y_raw,
-        y_pred=test_pred_raw,
-        is_imputed=test.target_is_imputed,
-        label=labels,
-        is_extreme=is_extreme,
-        score=test_score,
-        horizons=list(range(1, test.horizon + 1)),
-    )
-    return records, float(threshold)
+    return pd.concat(frames, ignore_index=True), float(threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +369,8 @@ def rung6_proposed(*_args, **_kwargs):
 # ---------------------------------------------------------------------------
 def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
                out_name: str | None = None, variant: str = "",
-               label_source: str = "auto") -> Path:
+               label_source: str = "auto",
+               score_mode: str | None = None) -> Path:
     """Run the Phase 1 rungs over one region and write one grouped report."""
     data_cfg = load_config("data")
     model_cfg = load_config("model")
@@ -341,11 +382,17 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
     log.info("loaded %d station(s) for region %r (variant %r)", len(stations),
              region, variant or "clean")
 
+    sc = model_cfg["decision_layer"].get("score", {})
     score_kwargs = {
         "threshold_method": dec["method"],
         "threshold_quantile": dec["quantile"],
+        "target_fpr_extremes": dec.get("target_fpr_extremes", 0.10),
         "label_source": label_source,
+        "score_mode": score_mode or sc.get("mode", "volatility"),
+        "volatility_floor": sc.get("volatility_floor", 0.25),
     }
+    log.info("scoring: mode=%s threshold=%s", score_kwargs["score_mode"],
+             score_kwargs["threshold_method"])
 
     all_records, all_thresholds, extras = [], {}, {}
 
@@ -413,6 +460,9 @@ def main() -> None:
                     choices=["auto", "real", "synthetic"],
                     help="ground truth for the anomaly table; 'auto' picks "
                          "synthetic when the build has it")
+    ap.add_argument("--score-mode", default=None,
+                    choices=["absolute", "volatility"],
+                    help="anomaly score form (default: configs/model.yaml)")
     args = ap.parse_args()
 
     unsupported = [r for r in args.rungs if r not in (1, 2, 3)]
@@ -424,7 +474,8 @@ def main() -> None:
 
     seed_everything(load_config("model").get("seed", 1337))
     out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name,
-                     variant=args.variant, label_source=args.label_source)
+                     variant=args.variant, label_source=args.label_source,
+                     score_mode=args.score_mode)
     print(f"\nreport -> {out}")
 
 

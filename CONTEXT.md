@@ -592,3 +592,126 @@ cutting `fpr_on_extremes`.**
 5. Carried forward: no meteorology; no −99 labels in this node set; flatline
    screen miscalibrated for near-detection-limit SO2; Indian values still need
    an OpenAQ API key.
+
+---
+
+## [2026-10-06] entry 6 — accuracy work: one win, one negative result, and the finding that reframes Phase 2
+
+Four stale rules in CLAUDE.md fixed first (§3.1's `Concentration` row and the
+`Validity` row, §6.7 step 7, §8.2's anomaly bullet, §9 Phase 2 step 6). All
+four still stated the pre-§2.1a ordering; anyone reading them alone would have
+got the wrong rule.
+
+### Infrastructure: scoring is now decoupled from training
+
+A ladder run saves `records.parquet` — truth, forecast, recent local
+volatility, imputation mask, label and fault subtype, for **both** validation
+and test. `src/evaluation/rescore.py` recalibrates and re-evaluates from it.
+A new scoring rule now costs about a second instead of a ~50-minute retrain,
+which is what made everything below measurable rather than arguable.
+
+### Fix: training split is now clean
+
+Injection is restricted to validation and test (`eligible_after=train_end`).
+Verified: train 0.0%, val ~3.0–3.4%, test ~2.2%. This matches deployment —
+train on verified history, run live on unverified readings — and removes the
+effect where a forecaster trained on corrupted values learns to track the very
+faults it is meant to expose.
+
+### Win: threshold policy
+
+Every score mode × threshold method, median across stations:
+
+| horizon | method | recall | precision | F1 | fpr_extremes | worst station |
+|---|---|---|---|---|---|---|
+| 6h | mad | 0.450 | 0.133 | 0.202 | 0.850 | 0.945 |
+| 6h | quantile 0.98 | 0.320 | 0.288 | 0.284 | 0.520 | 0.691 |
+| 6h | val_f1_sweep | 0.259 | 0.416 | 0.310 | 0.320 | 0.547 |
+| 6h | **val_fpr_extremes** | 0.216 | **0.595** | **0.326** | **0.164** | **0.306** |
+
+`val_fpr_extremes` — the lowest threshold keeping false positives on genuine
+extreme *validation* readings under 10% — gives the best F1 at 3h and 6h *and*
+cuts `fpr_on_extremes` by two-thirds. Worst-station 6h false-positive rate
+falls from 0.691 to 0.306. It is now the default. `mad` is catastrophic (0.850)
+and should never be used. At 1h the fixed quantile still edges it on F1 (0.343
+vs 0.296), at six times the false-positive rate — not a trade worth taking
+given §8.2.
+
+### Negative result: volatility scaling did not work
+
+The hypothesis (entry 5) was that dividing the residual by the recent local
+volatility would suppress false positives on genuine episodes, since real
+episodes are preceded by turbulent hours. It does reduce `fpr_on_extremes` at a
+matched threshold rule — but it degrades the threshold-free ranking at every
+horizon:
+
+| AUC-PR | 1h | 3h | 6h |
+|---|---|---|---|
+| absolute | **0.274** | **0.302** | **0.297** |
+| volatility | 0.204 | 0.256 | 0.264 |
+
+So the information it removes is worth more than the noise it suppresses. The
+default is back to `absolute`; the mode is kept selectable so the result stays
+reproducible rather than merely asserted. The false-positive problem is better
+solved at the threshold, which costs no ranking quality.
+
+### The finding that matters: four of six fault types are invisible
+
+Recall per subtype (local GRU, absolute + val_fpr_extremes):
+
+| subtype | 1h | 3h | 6h |
+|---|---|---|---|
+| spike | 0.590 | 0.766 | 0.755 |
+| noise | 0.403 | 0.387 | 0.329 |
+| dropout | 0.018 | 0.028 | 0.025 |
+| bias | 0.000 | 0.009 | 0.011 |
+| stuck_at | 0.000 | 0.000 | 0.000 |
+| drift | 0.000 | 0.003 | 0.003 |
+
+**The aggregate recall of ~0.2–0.3 is almost entirely spikes and noise.**
+Drift, bias, stuck-at and dropout are essentially undetected. Entry 5 predicted
+drift would be hard; the truth is worse and the cause is more general than
+expected.
+
+**Why, and it is structural rather than a tuning problem.** The faulty values
+enter the model's *own 24-hour input window*. A stuck sensor presents a flat
+history, so the GRU predicts flat and matches it. A bias offset shifts the lags
+and rolling means, so the forecast shifts with it. A drift is tracked. Dropout
+values near zero are continued once they are inside the window. Only faults
+that are abrupt *relative to the input window* — spikes, and the variance
+change of noise — ever produce a residual. Persistence (rung 1) fails the same
+way, and for the same reason: it reads the last observed value, which is itself
+corrupted.
+
+**No improvement to the forecaster can fix this.** A better forecaster tracks
+the fault more faithfully and makes the residual smaller. That is the opposite
+of what is wanted, and it is consistent with entry 5's other finding that the
+GRU raised `fpr_on_extremes` over persistence.
+
+### What this does to Phase 2
+
+It strengthens the case for rung 6 considerably, and sharpens what it has to
+do. Cross-station spatial agreement does not depend on the station's own
+history, so it is not corrupted by the fault: a station that drifts, sticks or
+sits at a constant offset while its neighbours do not should be visible in
+exactly the regime where residuals are blind. The graph layer is no longer a
+hoped-for accuracy increment — it is the only mechanism on the table that can
+catch four of the six fault types. `spatial_agreement()` now has a concrete,
+quantified target: **non-zero recall on drift, bias, stuck-at and dropout**,
+against a residual baseline of 0.000–0.052.
+
+A cheaper intermediate worth trying first, because it needs no federation: a
+reference that the fault cannot contaminate. A seasonal-naive comparison
+against the same hour one week earlier, `|y(t) − y(t−168)|`, is immune to a
+fault shorter than a week, so it should see persistent faults that the model
+residual cannot. It needs `y(t−168)` carried into the records, which the
+pipeline does not do yet.
+
+### Open items
+
+1. Seasonal-naive reference score (above) — cheap, no federation needed.
+2. Meteorology still disabled; the single largest forecasting lever untried.
+3. Per-subtype precision remains undefinable, by construction.
+4. `is_extreme` is a quantile proxy, not a confirmed event list (§11).
+5. Carried forward from entry 5: records now persisted (done), clean train
+   (done), per-subtype table (done).

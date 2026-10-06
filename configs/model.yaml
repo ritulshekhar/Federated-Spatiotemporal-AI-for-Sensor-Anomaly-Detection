@@ -66,8 +66,39 @@ server_gnn:
 decision_layer:
   # Residual threshold is calibrated per station on the VALIDATION split only.
   residual_threshold:
-    method: quantile          # quantile | mad | val_f1_sweep
-    quantile: 0.98
+    # quantile | mad | val_f1_sweep | val_fpr_extremes
+    # A fixed quantile silently assumes the fault rate equals 1 - quantile.
+    # val_f1_sweep picks the operating point from the data instead.
+    # MEASURED 2026-10-06 (CONTEXT.md entry 6). val_fpr_extremes gives the best
+    # F1 at 3h and 6h *and* by far the lowest false-positive rate on genuine
+    # episodes: at 6h it cuts fpr_on_extremes from 0.520 to 0.164 (worst station
+    # 0.691 -> 0.306) against the 0.98 quantile. `mad` is the worst option by a
+    # wide margin — 0.850 at 6h — and should not be used.
+    method: val_fpr_extremes
+    quantile: 0.98            # fallback, and used by method: quantile
+    # Used by val_fpr_extremes: cap on how often a genuine high-pollution
+    # reading may be called a fault. Measured at up to 0.667 with the naive
+    # detector (CONTEXT.md entry 5), which is what this exists to control.
+    target_fpr_extremes: 0.10
+
+  # How the anomaly score is formed from the forecast residual.
+  #   absolute   |y - yhat| / station scale        (the naive detector)
+  #   volatility |y - yhat| / recent local volatility
+  # Real pollution episodes are preceded by turbulent hours, so dividing by the
+  # volatility of the window's own 24h input suppresses the false positives
+  # that a plain residual produces on genuine events.
+  # MEASURED 2026-10-06: volatility scaling did NOT work and the default is
+  # back to `absolute`. It does lower fpr_on_extremes at a matched threshold
+  # rule, but it degrades the threshold-free ranking at every horizon — AUC-PR
+  # 0.204/0.256/0.264 against 0.274/0.302/0.297 for absolute at 1h/3h/6h. The
+  # false-positive problem is better handled by the threshold method above,
+  # which costs no ranking quality. Kept selectable so the result stays
+  # reproducible rather than merely asserted. CONTEXT.md entry 6.
+  score:
+    mode: absolute            # absolute | volatility
+    # Floor on the volatility divisor, as a fraction of the station's own
+    # training scale, so a very calm window cannot explode a small residual.
+    volatility_floor: 0.25
   spatial_agreement:
     metric: cosine            # cosine | learned
     high_agreement_threshold: 0.6

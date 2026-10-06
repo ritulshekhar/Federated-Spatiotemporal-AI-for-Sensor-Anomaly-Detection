@@ -143,10 +143,10 @@ should change, flag it explicitly rather than silently deviating.
 | `AirPollutant` | string | e.g. `PM10`. |
 | `AirPollutantCode` | string (URI) | See pollutant code table below. |
 | `AveragingTime` | string | `hour` for this project. |
-| `Concentration` | float | **Present even when Validity is negative — this is what makes real fault labels possible.** |
+| `Concentration` | float | ~~Present even when Validity is negative — this is what makes real fault labels possible.~~ **FALSE, corrected 2026-10-06.** In the Catalonia E1a delivery every one of the 27,783 `Validity`-negative rows carries exactly `-999.0`, the no-data sentinel, across all five pollutants. Whatever the sensor originally reported — a wrong number, or nothing at all during an outage — was replaced during verification, and the two cases are indistinguishable afterwards. `harmonize._mask_sentinels` converts it to missing. This is why §2.1 had to be amended; see §2.1a and CONTEXT.md entry 4. |
 | `UnitOfMeasurement` | string | µg/m³ for everything except CO (mg/m³ — unit trap, check before combining). |
 | `DatetimeBegin` / `DatetimeEnd` | datetime, tz-aware | CET/CEST — convert to UTC. |
-| `Validity` | integer | Fault ground truth. See table below. |
+| `Validity` | integer | Marks readings the operator invalidated. **Not usable as fault-vs-event ground truth** — the value is always replaced by the −999 sentinel (see `Concentration` above, and §2.1a). See code table below. |
 | `Verification` | integer | QA review status, independent of fault cause. See table below. |
 
 #### Validity codes (official, dd.eionet.europa.eu/vocabulary/aq/observationvalidity)
@@ -375,9 +375,19 @@ legitimate, reportable finding, not a bug to hide).
    (it encodes information about every station's distribution).
 6. **Windowing & split** — 24h input → 6h forecast horizon, stride 1. Chronological 70/15/15
    train/val/test split, by date, never randomly shuffled (shuffling leaks future into past).
-7. **Fault labelling** — primary: real EEA `Validity` labels (§3.1). Supplementary: synthetic
-   injection (stuck-at, drift, spike, noise, dropout, bias offset) for fault subtypes Validity
-   doesn't finely distinguish. If CPCB is in play, injection rate must match §5.5.
+7. **Fault labelling** — **primary: rate-matched synthetic injection** (stuck-at, drift, spike,
+   noise, dropout, bias offset), at the measured real rate (§2.7) and with episode durations drawn
+   from the real `Validity` episode-length distribution. Real `Validity` labels are carried
+   alongside as a data-availability baseline — they mark where a reading is *absent*, not where one
+   is *wrong*. **AMENDED 2026-10-06 to match §2.1a**; the original ordering (real primary,
+   synthetic supplementary) is impossible on this dataset. If CPCB is in play, injection rate must
+   match §5.5.
+
+   Injection is applied to the **validation and test splits only**; the training split stays clean.
+   That mirrors deployment — you train on verified history, where faults were already removed, and
+   run live on unverified readings where faults arrive as plausible numbers. Injecting into
+   training also lets the forecaster learn to track drifting and stuck sensors, shrinking the very
+   residuals the detector depends on.
 
 ---
 
@@ -463,11 +473,17 @@ even if it underperforms.
 ### 8.2 Metrics
 
 - **Forecasting:** RMSE, MAE, MAPE — per station, per horizon (1h/3h/6h), per station class.
-- **Anomaly:** precision, recall, F1, AUC-PR — measured against real Validity-flagged faults
-  primarily; separately against synthetic-injected faults where used. Always report a
-  false-positive rate on genuine (real, non-faulty) extreme readings too — recall alone is
-  meaningless without this control (this is the Gupchup 2019 lesson: naive detectors misclassify up
-  to 45% of real events as faults).
+- **Anomaly:** precision, recall, F1, AUC-PR — measured against rate-matched synthetic faults
+  primarily, and separately against real `Validity` labels as a data-availability baseline
+  (**AMENDED 2026-10-06 to match §2.1a**; the two are never merged, §5.3). Report **recall per
+  fault subtype** as well as in aggregate: the subtypes differ enormously in detectability, and a
+  lumped figure built mostly from spikes hides that drift is near-invisible to a residual
+  threshold. Per-subtype *precision* does not exist — a false alarm on a healthy reading has no
+  subtype — so only recall decomposes.
+  Always report a false-positive rate on genuine (real, non-faulty) extreme readings too — recall
+  alone is meaningless without this control (this is the Gupchup 2019 lesson: naive detectors
+  misclassify up to 45% of real events as faults). **Measured here at up to 66.7% at a 6h horizon**
+  (CONTEXT.md entry 5), so this is not a hypothetical risk in this project.
 - **Systems:** communication cost per round (MB), rounds to convergence, per-node compute.
 
 ### 8.3 Reporting rule — non-negotiable
@@ -490,7 +506,10 @@ pooled figure.
 3. Centralised ST-GNN (rung 4) — establishes the accuracy ceiling.
 4. FedAvg + GRU (rung 5) — federation without spatial reasoning.
 5. Server-side GNN (split learning) + decision layer (rung 6, the proposed model).
-6. Synthetic fault injection module, evaluated against real Validity labels.
+6. Synthetic fault injection module — **the primary Objective 4 evaluation** (§2.1a), reported
+   per fault subtype, with real `Validity` labels alongside as a data-availability baseline.
+   **AMENDED 2026-10-06.** Built early, during Phase 1, because without it Objective 4 has nothing
+   to measure at all.
 
 **Phase 3 — stretch goals, in priority order:**
 7. Dashboard (objective 7).
@@ -535,3 +554,9 @@ Do not start Phase 3 before Phase 1 and 2 produce real, reported numbers for eve
   data separately confirms "this was a genuine pollution event" as opposed to "this was simply a
   normal high reading" — evaluating the event-vs-baseline distinction specifically will need
   external corroboration (e.g. documented Saharan dust intrusion dates), not a dataset field.
+  **RESOLVED WORSE THAN EXPECTED, 2026-10-06:** `Validity` turned out to give *less* than binary
+  per-reading ground truth, because the reading itself is destroyed (§2.1a). The
+  event-vs-baseline corroboration problem above still stands and is untouched by the amendment —
+  `is_extreme` in `evaluation/metrics.py` is a quantile proxy for "genuine high reading", not a
+  confirmed event list, so `fpr_on_extremes` measures flagging of *unusually high* readings rather
+  than of *confirmed* pollution episodes. Sourcing documented episode dates would sharpen it.

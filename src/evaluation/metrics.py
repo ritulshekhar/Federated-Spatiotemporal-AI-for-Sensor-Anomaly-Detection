@@ -217,26 +217,104 @@ def residual_score(y_true: np.ndarray, y_pred: np.ndarray,
     return resid / max(float(scale), 1e-8)
 
 
+def volatility_scaled_score(y_true: np.ndarray, y_pred: np.ndarray,
+                            local_volatility: np.ndarray,
+                            floor: float) -> np.ndarray:
+    """Residual divided by how volatile the station's recent past was.
+
+    Motivation, from the measured failure (CONTEXT.md entry 5): a plain
+    residual threshold flags up to 66.7% of genuine high-pollution readings as
+    faults at a 6h horizon, and a *better* forecaster makes that worse, because
+    sharper forecasts produce bigger residuals on real events too.
+
+    The discriminator is context. A genuine pollution episode builds: the hours
+    before it are already turbulent, so a large residual there is unsurprising.
+    A sensor that spikes, sticks or drops out does so against whatever the
+    recent past happened to be, often a calm one. Dividing by the standard
+    deviation of the target over the input window therefore suppresses the
+    residuals caused by real events while preserving those caused by faults.
+
+    ``floor`` keeps a very calm window from turning a small residual into a huge
+    score; it is a fraction of the station's own training-window scale and
+    stays local (§6.5), so nothing here leaves the node.
+    """
+    resid = np.abs(np.asarray(y_pred, dtype=float) - np.asarray(y_true, dtype=float))
+    vol = np.asarray(local_volatility, dtype=float)
+    return resid / np.maximum(vol, floor)
+
+
 def calibrate_threshold(score: np.ndarray, method: str = "quantile",
                         quantile: float = 0.98,
-                        mask: np.ndarray | None = None) -> float:
+                        mask: np.ndarray | None = None,
+                        labels: np.ndarray | None = None,
+                        is_extreme: np.ndarray | None = None,
+                        target_fpr_extremes: float = 0.10) -> float:
     """Pick a residual threshold from VALIDATION scores only.
 
     Never from test, and — once a second region exists — never one global
     threshold inherited from whichever region trained first (§5.8, §7.4).
+
+    Methods:
+      ``quantile``  fixed quantile of the validation score distribution.
+      ``mad``       median + 3 scaled MADs.
+      ``val_f1_sweep``   the threshold maximising F1 on validation. Needs
+                    ``labels``. A fixed quantile assumes the fault rate equals
+                    1 - quantile, which is only accidentally true.
+      ``val_fpr_extremes``  the lowest threshold whose false-positive rate on
+                    genuine extreme validation readings stays under
+                    ``target_fpr_extremes``. Needs ``labels`` and
+                    ``is_extreme``. Use when the cost of crying wolf on a real
+                    pollution episode outweighs missed faults — which §8.2
+                    argues is the usual case here.
     """
     s = np.asarray(score, dtype=float).ravel()
     keep = np.isfinite(s)
     if mask is not None:
         keep &= np.asarray(mask, dtype=bool).ravel()
-    s = s[keep]
-    if s.size == 0:
+
+    if method in ("val_f1_sweep", "val_fpr_extremes"):
+        if labels is None:
+            raise ValueError(f"method {method!r} needs validation labels")
+        y = np.asarray(labels).ravel()
+        keep &= (y != -1)
+
+    s_keep = s[keep]
+    if s_keep.size == 0:
         raise ValueError("no finite validation scores to calibrate a threshold on")
 
     if method == "quantile":
-        return float(np.quantile(s, quantile))
+        return float(np.quantile(s_keep, quantile))
     if method == "mad":
-        median = float(np.median(s))
-        mad = float(np.median(np.abs(s - median)))
+        median = float(np.median(s_keep))
+        mad = float(np.median(np.abs(s_keep - median)))
         return median + 3.0 * 1.4826 * mad
-    raise ValueError(f"unknown threshold method {method!r}")
+
+    y = (np.asarray(labels).ravel()[keep] == 1)
+    candidates = np.unique(np.quantile(s_keep, np.linspace(0.50, 0.9995, 400)))
+    if y.sum() == 0:
+        return float(np.quantile(s_keep, quantile))
+
+    if method == "val_f1_sweep":
+        best_t, best_f1 = float(candidates[-1]), -1.0
+        for t in candidates:
+            pred = s_keep > t
+            tp = int((pred & y).sum())
+            if tp == 0:
+                continue
+            precision = tp / int(pred.sum())
+            recall = tp / int(y.sum())
+            f1 = 2 * precision * recall / (precision + recall)
+            if f1 > best_f1:
+                best_t, best_f1 = float(t), f1
+        return best_t
+
+    # val_fpr_extremes
+    if is_extreme is None:
+        raise ValueError("method 'val_fpr_extremes' needs is_extreme")
+    ext = np.asarray(is_extreme, dtype=bool).ravel()[keep] & ~y
+    if ext.sum() == 0:
+        return float(np.quantile(s_keep, quantile))
+    for t in candidates:                      # ascending: first pass wins
+        if float(((s_keep > t) & ext).sum() / ext.sum()) <= target_fpr_extremes:
+            return float(t)
+    return float(candidates[-1])

@@ -28,7 +28,7 @@ pooled on the way in.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -47,8 +47,8 @@ REQUIRED_GROUP_KEYS = ("region", "station_class", "label_source")
 
 RECORD_COLUMNS = [
     "model", "region", "station_id", "station_class", "label_source",
-    "horizon", "t_target", "y_true", "y_pred", "is_imputed", "label",
-    "is_extreme", "score",
+    "split", "horizon", "t_target", "y_true", "y_pred", "is_imputed", "label",
+    "fault_type", "is_extreme", "local_volatility", "score",
 ]
 
 
@@ -90,29 +90,43 @@ def make_records(
     is_extreme: np.ndarray,
     score: np.ndarray,
     horizons: list[int],
+    split: str = "test",
+    fault_type: np.ndarray | None = None,
+    local_volatility: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Flatten one station's (n_windows, horizon) arrays into long records.
 
     ``horizons`` names the lead time of each column: ``[1, 2, ..., H]``, of
     which §8.2 reports 1/3/6.
+
+    ``fault_type`` and ``local_volatility`` exist so a detector can be rescored
+    offline. Everything needed to recompute an anomaly score — the truth, the
+    forecast, the recent volatility, the subtype — travels with the record, so
+    trying a new scoring rule costs a second rather than a full retrain.
     """
     n, h = np.asarray(y_true).shape
     if len(horizons) != h:
         raise ValueError(f"{len(horizons)} horizon labels for {h} columns")
 
+    nan_col = np.full(n * h, np.nan)
     return pd.DataFrame({
         "model": model,
         "region": region,
         "station_id": station_id,
         "station_class": station_class,
         "label_source": label_source,
+        "split": split,
         "horizon": np.tile(np.asarray(horizons), n),
         "t_target": np.asarray(t_target).ravel(),
         "y_true": np.asarray(y_true, dtype=float).ravel(),
         "y_pred": np.asarray(y_pred, dtype=float).ravel(),
         "is_imputed": np.asarray(is_imputed, dtype=bool).ravel(),
         "label": np.asarray(label).ravel(),
+        "fault_type": (np.asarray(fault_type, dtype=object).ravel()
+                       if fault_type is not None else None),
         "is_extreme": np.asarray(is_extreme, dtype=bool).ravel(),
+        "local_volatility": (np.repeat(np.asarray(local_volatility, dtype=float), h)
+                             if local_volatility is not None else nan_col),
         "score": np.asarray(score, dtype=float).ravel(),
     })[RECORD_COLUMNS]
 
@@ -189,6 +203,52 @@ def anomaly_table(records: pd.DataFrame,
     return out
 
 
+def subtype_recall_table(records: pd.DataFrame, thresholds: dict[tuple[str, str], float],
+                         horizons: list[int] | None = None,
+                         exclude_imputed: bool = True) -> pd.DataFrame:
+    """Recall per injected fault subtype (§8.2).
+
+    **Recall only, and that is not an oversight.** Precision cannot decompose by
+    subtype: a false alarm lands on a healthy reading, which has no fault type
+    to be counted under. Any per-subtype "precision" column would be an artefact
+    of how you chose to apportion false positives, so none is produced.
+
+    This exists because the aggregate figure averages subtypes of wildly
+    different difficulty. A spike moves the value immediately and far; a slow
+    drift is tracked by the forecaster itself, so its residual never grows. One
+    lumped recall built mostly from spikes would hide that drift is invisible.
+    """
+    if "fault_type" not in records.columns or records["fault_type"].isna().all():
+        return pd.DataFrame()
+
+    df = records[records["label"] == "fault"].copy()
+    if horizons is not None:
+        df = df[df["horizon"].isin(horizons)]
+    if exclude_imputed:
+        df = df[~df["is_imputed"]]
+    df = df[df["fault_type"].notna()]
+    if df.empty:
+        return pd.DataFrame()
+
+    by = ["model", "region", "station_class", "label_source", "horizon", "fault_type"]
+    rows = []
+    for keys, g in _grouped(df, by):
+        keyed = dict(zip(by, keys))
+        detected, total = 0, 0
+        for sid, gs in g.groupby("station_id"):
+            tkey = (keyed["model"], sid)
+            if tkey not in thresholds:
+                continue
+            detected += int((gs["score"] > thresholds[tkey]).sum())
+            total += len(gs)
+        if total:
+            rows.append(keyed | {"n_faults": total, "n_detected": detected,
+                                 "recall": detected / total})
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(by).reset_index(drop=True) if not out.empty else out
+
+
 def spread_table(per_station: pd.DataFrame, value_columns: list[str]) -> pd.DataFrame:
     """Distribution of a per-station metric across the stations in a group.
 
@@ -241,6 +301,8 @@ class Report:
     forecast_spread: pd.DataFrame
     anomaly_spread: pd.DataFrame
     meta: dict
+    subtype_recall: pd.DataFrame = field(default_factory=pd.DataFrame)
+    records: pd.DataFrame | None = None
 
     def write(self, directory: str | Path | None = None) -> Path:
         directory = Path(directory) if directory else data_paths()["outputs"] / self.name
@@ -250,8 +312,16 @@ class Report:
             ("anomaly_per_station", self.anomaly),
             ("forecast_spread", self.forecast_spread),
             ("anomaly_spread", self.anomaly_spread),
+            ("subtype_recall", self.subtype_recall),
         ):
             df.to_csv(directory / f"{label}.csv", index=False)
+
+        # Per-reading records, so any later scoring change can be evaluated
+        # without retraining anything.
+        if self.records is not None and not self.records.empty:
+            self.records.to_parquet(directory / "records.parquet", index=False)
+            log.info("records saved (%s rows) -> %s", f"{len(self.records):,}",
+                     directory / "records.parquet")
         (directory / "meta.json").write_text(
             json.dumps(self.meta, indent=2, default=str), encoding="utf-8"
         )
@@ -291,12 +361,15 @@ def build_report(name: str, records: pd.DataFrame,
                  thresholds: dict[tuple[str, str], float],
                  horizons: list[int] | None = None, meta: dict | None = None) -> Report:
     """The single sanctioned way to turn prediction records into a report."""
-    fc = forecast_table(records, horizons=horizons)
-    an = anomaly_table(records, thresholds=thresholds, horizons=horizons)
+    scored = records[records["split"] == "test"] if "split" in records.columns else records
+    fc = forecast_table(scored, horizons=horizons)
+    an = anomaly_table(scored, thresholds=thresholds, horizons=horizons)
     return Report(
         name=name,
         forecast=fc,
         anomaly=an,
+        subtype_recall=subtype_recall_table(scored, thresholds, horizons=horizons),
+        records=records,
         forecast_spread=spread_table(fc, ["rmse", "mae", "mape"]),
         anomaly_spread=spread_table(
             an, ["precision", "recall", "f1", "auc_pr", "fpr_on_extremes"]

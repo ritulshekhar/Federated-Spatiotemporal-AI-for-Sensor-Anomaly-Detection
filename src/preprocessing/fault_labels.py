@@ -121,6 +121,7 @@ def inject_faults(
     seed: int = 1337,
     max_attempts_factor: int = 8,
     use_real_durations: bool = True,
+    eligible_after: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, InjectionReport]:
     """Inject rate-matched synthetic faults into ``pollutant``, in place on a copy.
 
@@ -152,6 +153,14 @@ def inject_faults(
     was_imputed = frame[pollutant + IMPUTED_SUFFIX].to_numpy(dtype=bool) \
         if (pollutant + IMPUTED_SUFFIX) in frame.columns else np.zeros(n, dtype=bool)
     eligible = np.isfinite(values) & ~real_fault & ~was_imputed
+
+    # §6.7: the training split stays clean. Deployment trains on verified
+    # history, where faults were already removed, and runs live on unverified
+    # readings where faults arrive as plausible numbers. Injecting into training
+    # also teaches the forecaster to track drifting and stuck sensors, shrinking
+    # the very residuals the detector depends on.
+    if eligible_after is not None:
+        eligible &= np.asarray(frame.index > eligible_after, dtype=bool)
 
     n_eligible = int(eligible.sum())
     if n_eligible == 0:
