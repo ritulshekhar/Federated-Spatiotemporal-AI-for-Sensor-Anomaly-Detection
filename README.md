@@ -23,7 +23,7 @@ possible.
 
 | Phase | State |
 |---|---|
-| **1** — data pipeline, preprocessing, baseline rungs 1–3 | Running on real EEA data |
+| **1** — data pipeline, preprocessing, baseline rungs 1–3 | Complete, on real EEA data |
 | **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Not started |
 | **3** — dashboard, India generalization experiment | Acquisition + schema verified; not wired in |
 
@@ -38,6 +38,28 @@ Measured from the EEA E1a (verified) delivery for Catalonia, 2017–2024:
 | **Real fault rate** | **2.805%** (1.6%–4.6% per station) |
 | Validity codes present | `1` and `-1` only — no `-99` maintenance flags exist in this node set |
 | Verification | every row is `1` (verified) |
+
+### Objective 4 baseline (`outputs/phase1_catalonia_injected/`)
+
+Fault classification against rate-matched synthetic faults (§2.1a). Median
+across stations, urban-background class:
+
+| Model | h=1 recall | h=1 `fpr_on_extremes` | h=6 recall | h=6 `fpr_on_extremes` |
+|---|---|---|---|---|
+| Persistence | 0.178 | 0.017 | 0.216 | **0.500** |
+| Local GRU | 0.219 | 0.106 | 0.286 | 0.370 |
+| Centralised GRU | 0.219 | 0.148 | 0.257 | 0.481 |
+
+Read the two columns together. At 6h the naive residual detector calls **up to
+66.7%** of genuine high-pollution readings sensor faults — the Gupchup et al.
+(2019) failure mode, which they measured at up to 45%. And a better forecaster
+makes it *worse*: local GRU buys +0.04 recall at h=1 for a six-fold rise in
+false positives on real events, because sharper forecasts produce bigger
+residuals on genuine extremes too.
+
+That is the gap rung 6 exists to close: **hold recall, cut
+`fpr_on_extremes`**, using cross-station spatial agreement to tell "unusual"
+from "wrong".
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 

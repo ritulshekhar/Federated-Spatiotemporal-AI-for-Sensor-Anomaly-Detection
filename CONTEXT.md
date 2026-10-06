@@ -493,3 +493,102 @@ The forecasting half is unaffected by the conceptual problem and is now
 computed on clean data. The federated architecture, the privacy contract, the
 per-station discipline and the no-pooling reporting are all untouched. What
 needs rethinking is specifically how Objective 4 gets evaluated.
+
+---
+
+## [2026-10-06] entry 5 — Option A implemented, and the first honest Objective 4 numbers
+
+The project owner chose **option A** from entry 4: rate-matched synthetic
+injection becomes the primary Objective 4 ground truth. CLAUDE.md §2.1 is
+struck through with its original reasoning preserved, §2.1a added, and
+objective 5 amended. Commit `2289719`.
+
+### What was built
+
+- `fault_labels.real_episode_durations()` — episode *durations* are now sampled
+  from the real `Validity` episode-length distribution (264 real episodes at
+  ES1679A, median 2h). EEA's flags genuinely evidence *when* an instrument
+  failed and *for how long*; only the corrupted value is synthesised.
+- Budget is split **by row count per fault type**, not per episode. Choosing a
+  type per episode let drift take 63% of injected rows and left spike with
+  1.5%, because drift's 72h floor sits far above the real 2h median.
+- `windowing` carries synthetic labels and fault types in arrays reachable only
+  through `labels_for(source)`, so real and synthetic cannot be merged by
+  accident.
+- Clean and injected builds live in separate variant directories. One is the
+  forecasting reference, the other the Objective 4 ground truth.
+
+Verified: injection rate 0.0280 against a target of 0.0280, 323–324 rows per
+subtype, 37 tests passing.
+
+### The numbers (`outputs/phase1_catalonia_injected/`)
+
+Median across stations, by station class. Recall / AUC-PR / `fpr_on_extremes`:
+
+| Model | class | h=1 recall | h=1 fpr_ext | h=6 recall | h=6 fpr_ext | best AUC-PR |
+|---|---|---|---|---|---|---|
+| persistence | urban_bg | 0.178 | 0.017 | 0.216 | **0.500** | 0.185 |
+| local GRU | urban_bg | 0.219 | 0.106 | 0.286 | 0.370 | 0.322 |
+| centralised GRU | urban_bg | 0.219 | 0.148 | 0.257 | 0.481 | 0.300 |
+| persistence | urban_traffic | 0.361 | 0.011 | 0.418 | 0.348 | 0.370 |
+| local GRU | urban_traffic | 0.386 | 0.117 | 0.481 | **0.631** | 0.508 |
+| centralised GRU | urban_traffic | 0.399 | 0.117 | 0.484 | 0.520 | 0.504 |
+
+**Three things worth keeping.**
+
+**1. The task is genuinely hard now.** Recall 0.15–0.50, AUC-PR 0.15–0.51. The
+earlier apparent AUC-PR of 0.67–0.83 was an artefact of the −999 sentinel
+(entry 4) and is superseded. These are the first numbers that measure the
+actual research question rather than a sentinel lookup.
+
+**2. `fpr_on_extremes` is the headline, and it is bad.** At 6h the naive
+residual detector misclassifies **up to 66.7%** of genuine high-pollution
+readings as sensor faults (local GRU, urban traffic; median 0.631). Gupchup et
+al. (2019) reported up to 45% and §8.2 banned recall-alone metrics because of
+it — this reproduces that failure and exceeds it. Any 6h recall figure quoted
+without this column beside it would be actively misleading.
+
+**3. Better forecasting makes the false-positive problem worse, not better.**
+At h=1 urban background, going from persistence to the local GRU lifts recall
+0.178 → 0.219 but takes `fpr_on_extremes` 0.017 → 0.106, a six-fold rise. A
+sharper forecaster produces larger residuals on real events too, so the
+residual threshold alone cannot separate "unusual" from "wrong". That is
+precisely the gap `spatial_agreement()` exists to close, and it is now a
+quantified target rather than an argument: **rung 6 has to hold recall while
+cutting `fpr_on_extremes`.**
+
+### Caveats on these numbers — read before quoting them
+
+- **Faults were injected into all three splits, not just test** (ES1679A: 2.9%
+  train / 2.4% val / 2.6% test). The forecaster therefore trained on corrupted
+  values. That is less realistic than it looks: in deployment you train on
+  *verified* history, where EEA already replaced faults with −999, and run live
+  on unverified readings where faults arrive as plausible numbers. A
+  clean-train / injected-val / injected-test build matches deployment better,
+  and may also be flattering the detector here, since a forecaster that has
+  seen stuck and drifting values predicts them better and so shrinks the very
+  residuals meant to expose them. **Not yet changed — open item.**
+- **No per-subtype breakdown yet.** The injector balances all six subtypes and
+  `fault_type` travels through the windows, but `make_records` drops it, so the
+  report cannot group by it. The aggregate recall almost certainly hides a wide
+  spread: spike/dropout/bias produce large immediate residuals, while drift is
+  tracked by the forecaster and is expected to be near-undetectable. Drift is
+  the subtype §6.7 and D'Elia et al. (2024) care most about. **Open item.**
+- Forecast RMSE in this report (14.65–18.47 at h=1) is computed on *corrupted*
+  test targets and is not comparable with the clean run's 7.1–9.7. Use
+  `outputs/phase1_catalonia/` for forecasting accuracy.
+- Per-subtype *precision* will never be definable: a false alarm on a healthy
+  reading has no fault type. Only recall decomposes by subtype.
+
+### Open items
+
+1. Clean-train variant (above).
+2. Per-subtype recall table (above).
+3. CLAUDE.md still states the superseded rule in four places that now
+   contradict §2.1a: the §3.1 `Concentration` row, §6.7 step 7, §8.2's anomaly
+   bullet, and §9 Phase 2 step 6.
+4. Persist per-reading records to disk, so later breakdowns never require
+   retraining.
+5. Carried forward: no meteorology; no −99 labels in this node set; flatline
+   screen miscalibrated for near-detection-limit SO2; Indian values still need
+   an OpenAQ API key.
