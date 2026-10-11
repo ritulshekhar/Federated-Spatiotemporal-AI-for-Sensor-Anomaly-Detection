@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from src.evaluation.metrics import calibrate_threshold
 from src.utils.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -109,7 +110,10 @@ def normalise(score: np.ndarray, reference: np.ndarray | None = None) -> np.ndar
     ref = reference if reference is not None else score
     ref = ref[np.isfinite(ref)]
     if ref.size == 0:
-        return np.zeros_like(score)
+        # An all-NaN detector (e.g. spatial, with no server GNN) must stay NaN
+        # so nanmax ignores it. Returning zeros would make an absent detector
+        # look like a live one sitting exactly at its threshold.
+        return np.full_like(score, np.nan, dtype=float)
     median = float(np.median(ref))
     mad = float(np.median(np.abs(ref - median))) or 1e-9
     return (score - median) / (1.4826 * mad)
@@ -127,14 +131,55 @@ class DecisionLayer:
         self.variance_window = variance_window
         self.use_low_variance = use_low_variance
         self._scales: dict[str, np.ndarray] = {}
+        self._thresholds: dict[str, float] = {}
 
-    def score(self, frame: pd.DataFrame, fit_scales: bool = False) -> DetectorOutput:
-        """Score one station's time-ordered frame.
+    def fit(self, frame: pd.DataFrame, labels: np.ndarray,
+            is_extreme: np.ndarray, target_fpr_extremes: float = 0.10) -> "DecisionLayer":
+        """Calibrate each detector separately, on validation, to its own budget.
 
-        Expects ``residual`` (|y - ŷ| / scale), ``y_true`` and optionally
-        ``spatial`` (per-window disagreement from the server GNN). Rows must be
-        in time order; the rolling statistics depend on it.
+        This is the fix for the precision collapse measured in entry 10.
+        Combining four standardised detectors with a maximum and then applying
+        *one* threshold gives every reading four chances to clear one bar, so
+        false positives compound — recall doubled but precision fell from 0.722
+        to 0.173.
+
+        Here each detector gets ``target_fpr_extremes / k`` of the budget, so
+        by the union bound the combined false-positive rate on genuine extremes
+        stays under the target no matter how many detectors run. Each
+        detector's score is then expressed as its *margin* over its own
+        threshold, which puts them on a comparable footing: the combined score
+        crosses zero exactly when some detector has exceeded its own budgeted
+        operating point.
         """
+        parts = self._parts(frame)
+        self._scales = {k: v.copy() for k, v in parts.items()}
+        standardised = {k: normalise(v, self._scales[k]) for k, v in parts.items()}
+
+        # Usability is decided on the RAW outputs: a detector that produced
+        # nothing must not claim a share of the budget.
+        usable = [k for k, v in parts.items() if np.isfinite(v).any()]
+        budget = target_fpr_extremes / max(len(usable), 1)
+        log.info("decision layer: %d detector(s), %.3f FP budget each",
+                 len(usable), budget)
+
+        self._thresholds = {}
+        for key in usable:
+            try:
+                self._thresholds[key] = calibrate_threshold(
+                    standardised[key], method="val_fpr_extremes",
+                    labels=labels, is_extreme=is_extreme,
+                    target_fpr_extremes=budget,
+                )
+            except ValueError:
+                # No labelled extremes for this detector; fall back to a plain
+                # quantile at the same budget rather than leaving it uncapped.
+                finite = standardised[key][np.isfinite(standardised[key])]
+                self._thresholds[key] = (float(np.quantile(finite, 1 - budget))
+                                         if finite.size else np.inf)
+        return self
+
+    def _parts(self, frame: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Raw (unstandardised) output of each detector."""
         residual = frame["residual"].astype(float)
 
         # Rolling windows leave NaN at the head of a series, so an all-NaN
@@ -157,23 +202,36 @@ class DecisionLayer:
                                       self.variance_window)
                    if self.use_low_variance else np.full(len(frame), np.nan))
 
-        parts = {
+        return {
             "residual": residual.to_numpy(dtype=float),
             "accumulated": accumulated,
             "low_variance": low_var,
             "spatial": spatial,
         }
-        if fit_scales:
-            self._scales = {k: v.copy() for k, v in parts.items()}
 
-        standardised = {
-            k: normalise(v, self._scales.get(k)) for k, v in parts.items()
-        }
-        usable = {k: v for k, v in standardised.items()
-                  if np.isfinite(v).any()}
-        stacked = np.vstack(list(usable.values()))
+    def score(self, frame: pd.DataFrame) -> DetectorOutput:
+        """Score one station's time-ordered frame. ``fit`` must have run first.
+
+        Expects ``residual`` (|y - ŷ| / scale), ``y_true`` and optionally
+        ``spatial`` (per-window disagreement from the server GNN). Rows must be
+        in time order; the rolling statistics depend on it.
+        """
+        if not self._thresholds:
+            raise RuntimeError(
+                "DecisionLayer.fit() must run on the validation split before "
+                "scoring — per-detector thresholds are calibrated there, never "
+                "on test (§7.4)."
+            )
+        parts = self._parts(frame)
+        standardised = {k: normalise(v, self._scales.get(k))
+                        for k, v in parts.items()}
+
+        # Margin over each detector's own budgeted threshold: positive means
+        # that detector has fired. Zero is therefore the natural cut point.
+        margins = {k: standardised[k] - t for k, t in self._thresholds.items()}
+        stacked = np.vstack(list(margins.values()))
         combined = np.nanmax(stacked, axis=0)
-        which = np.array(list(usable.keys()))[np.nanargmax(
+        which = np.array(list(margins.keys()))[np.nanargmax(
             np.nan_to_num(stacked, nan=-np.inf), axis=0)]
 
         return DetectorOutput(

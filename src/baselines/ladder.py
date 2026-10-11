@@ -110,7 +110,10 @@ def load_region(region: str, variant: str = "") -> list[StationData]:
 # use a different threshold rule or skip the false-positive control.
 # ---------------------------------------------------------------------------
 def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
-                     spatial_series: pd.Series | None, fit: bool) -> np.ndarray:
+                     spatial_series: pd.Series | None, fit: bool,
+                     labels: np.ndarray | None = None,
+                     is_extreme: np.ndarray | None = None,
+                     target_fpr_extremes: float = 0.10) -> np.ndarray:
     """Run the decision-layer ensemble per horizon, returning (n_windows, horizon).
 
     Each horizon is a separate stride-1 time series, so its rolling statistics
@@ -129,7 +132,12 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
         if spatial_by_t0 is not None:
             frame["spatial"] = spatial_by_t0
         ordered = frame.sort_index()
-        scored = layer.score(ordered, fit_scales=fit)
+        if fit:
+            order = np.argsort(index.to_numpy())
+            layer.fit(ordered, labels=labels[:, j][order],
+                      is_extreme=is_extreme[:, j][order],
+                      target_fpr_extremes=target_fpr_extremes)
+        scored = layer.score(ordered)
         out[:, j] = pd.Series(scored.combined, index=ordered.index).reindex(index).to_numpy()
     return out
 
@@ -163,13 +171,27 @@ def score_station(station: StationData, model_name: str,
     val_pred_raw = station.y_pred_raw(pred_val_norm)
     test_pred_raw = station.y_pred_raw(pred_test_norm)
 
+    # Needed before scoring: the decision layer calibrates each detector on the
+    # validation labels, so they have to exist first.
+    resolved_source = label_source
+    if resolved_source == "auto":
+        resolved_source = ("synthetic" if val.target_synthetic_label is not None
+                           else "real")
+    val_codes = val.labels_for(resolved_source)
+    val_extreme = extreme_mask(
+        val.y_raw, quantile=extreme_quantile,
+        reference=station.splits["train"].y_raw.ravel(),
+    )
+
     if spatial is not None:
         # Rung 6: the four-detector ensemble, fitted on validation and applied
         # to test. One DecisionLayer per horizon, because each horizon is its
         # own time-ordered series and the rolling statistics must not mix them.
         layers = [DecisionLayer() for _ in range(val.horizon)]
         val_score = _decision_scores(layers, val, val_pred_raw, scale,
-                                     spatial.get("val"), fit=True)
+                                     spatial.get("val"), fit=True,
+                                     labels=val_codes, is_extreme=val_extreme,
+                                     target_fpr_extremes=target_fpr_extremes)
         test_score = _decision_scores(layers, test, test_pred_raw, scale,
                                       spatial.get("test"), fit=False)
     elif score_mode == "volatility":
@@ -183,13 +205,6 @@ def score_station(station: StationData, model_name: str,
     else:
         raise ValueError(f"unknown score_mode {score_mode!r}")
 
-    val_codes = val.labels_for(label_source if label_source != "auto"
-                               else ("synthetic" if val.target_synthetic_label is not None
-                                     else "real"))
-    val_extreme = extreme_mask(
-        val.y_raw, quantile=extreme_quantile,
-        reference=station.splits["train"].y_raw.ravel(),
-    )
     threshold = calibrate_threshold(
         val_score, method=threshold_method, quantile=threshold_quantile,
         mask=~val.target_is_imputed, labels=val_codes, is_extreme=val_extreme,
@@ -210,9 +225,7 @@ def score_station(station: StationData, model_name: str,
     # scored "synthetic" (the §2.1a primary ground truth) and the clean variant
     # "real" (the data-availability baseline). Both are reported, from their own
     # run, and §8.3's grouping keeps them apart.
-    source = label_source
-    if source == "auto":
-        source = "synthetic" if test.target_synthetic_label is not None else "real"
+    source = resolved_source
 
     # Validation records are kept too, so a different scoring rule or threshold
     # method can be calibrated and evaluated offline from records.parquet
