@@ -24,7 +24,7 @@ possible.
 | Phase | State |
 |---|---|
 | **1** — data pipeline, preprocessing, baseline rungs 1–3 | Complete, on real EEA data |
-| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Not started |
+| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Rung 5 (FedAvg + GRU) done; rungs 4 and 6 to build |
 | **3** — dashboard, India generalization experiment | Acquisition + schema verified; not wired in |
 
 ### What the real data looks like

@@ -919,3 +919,97 @@ it in a way a temporal one is not.
 3. An ensemble combining residual + spatial, rather than either alone.
 4. Rungs 4 and 5 still to build (§8.1 order).
 5. Carried: meteorology disabled; India untestable without an OpenAQ key.
+
+---
+
+## [2026-10-12] entry 9 — rung 5: federation costs almost nothing
+
+Phase 2 begins. `src/federated/{client,server,aggregation_weights}.py`
+implement §7.1–7.3 and §5.7: `region_first` weighting (locked default, which
+with one region reduces to uniform — all seven nodes weighted 0.143), FedAvg
+over GRU weights, and early stopping on mean client validation loss.
+
+The privacy allowlist in `configs/federation.yaml` is enforced by
+`check_upload` on **every upload of every round**, not just in tests. It
+rejects any field the config does not permit and runs
+`contains_normalization_statistics` over the payload. No violations across the
+run.
+
+Weight averaging needs one architecture, so clients share the **15 feature
+columns common to all seven stations**, against the 15–31 a local model may
+use. That is a real cost of weight sharing, and it makes the result below more
+interesting rather than less.
+
+### Results (injected variant; all rungs rescored uniformly with absolute + val_fpr_extremes)
+
+Forecast RMSE, µg/m³ NO2, median across stations:
+
+| model | 1h | 3h | 6h |
+|---|---|---|---|
+| persistence | 17.23 | 25.40 | 28.16 |
+| local GRU (rung 2) | 15.10 | **19.03** | **20.02** |
+| centralised GRU (rung 3) | 15.10 | 19.30 | 20.85 |
+| **FedAvg GRU (rung 5)** | **15.10** | 19.38 | 20.69 |
+
+Anomaly, median across stations:
+
+| model | h | recall | precision | F1 | AUC-PR | fpr_ext |
+|---|---|---|---|---|---|---|
+| local GRU | 1 | 0.199 | 0.735 | 0.307 | 0.307 | 0.020 |
+| centralised GRU | 1 | 0.189 | 0.721 | 0.296 | 0.302 | 0.025 |
+| **FedAvg GRU** | 1 | **0.202** | 0.722 | **0.314** | **0.311** | 0.024 |
+| local GRU | 3 | 0.234 | 0.652 | **0.351** | 0.339 | 0.142 |
+| **FedAvg GRU** | 3 | 0.234 | 0.682 | 0.344 | **0.346** | 0.157 |
+| **FedAvg GRU** | 6 | 0.215 | 0.692 | **0.341** | 0.339 | 0.188 |
+
+**Federation is essentially free here.** FedAvg matches centralised training
+on forecasting (identical at 1h; 19.38 vs 19.30 at 3h; and *better* at 6h,
+20.69 vs 20.85) and matches or slightly beats both baselines on anomaly AUC-PR
+at 1h and 3h. It does this with 15 features instead of up to 31, and with raw
+data never leaving a node.
+
+For context, Khan et al. (2024) — the §10 benchmark for this rung — report
+94.5% federated against 96.7% centralised, a ~2.3% relative gap. Here the
+federated-vs-centralised gap is within ±1% and reverses sign at 6h.
+
+### Communication (§8.2)
+
+| | |
+|---|---|
+| rounds run | 14 (early stopped) |
+| rounds to convergence | 6 (best round 5) |
+| per round | 1.595 MB |
+| **total** | **22.3 MB** |
+
+22 MB of weight traffic buys centralised-equivalent accuracy across 7 stations
+and 8 years of hourly data. Measured from actual tensor sizes, uncompressed,
+uplink plus downlink — `compress_weights` is deliberately off so the honest
+number is the baseline.
+
+### What this does and does not show
+
+It shows federation is not the bottleneck: the privacy constraint costs almost
+nothing in accuracy. It does **not** improve fault detection — rung 5's recall
+and per-subtype profile track rung 2's closely, which is expected, since
+§8.1's rung 5 is federation *without* spatial reasoning. The four invisible
+subtypes stay invisible.
+
+That is the cleanest possible setup for rung 6. With federation shown to be
+accuracy-neutral, any improvement rung 6 produces is attributable to the graph
+layer and the decision design, not to federation. And entry 8 already measured
+what the graph layer has to reach for: drift 0.149, bias 0.261 from raw
+neighbour comparison.
+
+### Note on comparing with earlier entries
+
+Forecast RMSE here (15.10 at 1h) is on the *injected* variant, whose test
+targets contain synthetic corruption. Entry 5's clean-data figures (7.1–9.7)
+are not comparable. Use `outputs/phase1_catalonia/` for forecasting accuracy
+and `outputs/phase2_ladder/` for the ladder comparison.
+
+### Open items
+
+1. Rung 4 (centralised ST-GNN) still unbuilt — §8.1 wants it as the ceiling.
+2. Rung 6: server GNN + the four-part decision layer from entries 7–8.
+3. Low-variance test for stuck-at, still the only route to that subtype.
+4. Carried: meteorology disabled; India untestable without an OpenAQ key.
