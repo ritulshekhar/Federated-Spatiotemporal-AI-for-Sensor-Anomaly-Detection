@@ -1,10 +1,22 @@
 # FedAirGuard — federated training configuration (CLAUDE.md §5.7, §7.3)
 # Phase 2. Present now so the contract is fixed before the code lands.
 
-rounds: 60
+rounds: 60                    # maximum; early stopping usually ends it sooner
 local_epochs: 2
-client_fraction: 1.0          # all 10 Barcelona nodes participate each round
+client_fraction: 1.0          # all participating nodes join every round
 seed: 1337
+
+# Early stopping on mean validation loss across clients. The round that
+# achieved the best value is what §8.2 calls "rounds to convergence"; without
+# this, a fixed 60 rounds spends most of its compute after improvement stops.
+early_stopping_patience: 8
+
+train:
+  # Larger batches than the local GRU (§ model.yaml node_gru) because a round
+  # retrains every client, so per-round wall time dominates the run.
+  batch_size: 256
+  lr: 0.001
+  grad_clip: 1.0
 
 # ---------------------------------------------------------------------------
 # Aggregation weighting (CLAUDE.md §5.7) — LOCKED DEFAULT

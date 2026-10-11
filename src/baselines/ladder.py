@@ -350,11 +350,62 @@ def rung4_centralised_stgnn(*_args, **_kwargs):
     )
 
 
-def rung5_fedavg_gru(*_args, **_kwargs):
-    raise NotImplementedError(
-        "Rung 5 (FedAvg + GRU) is Phase 2. Compare against Khan et al. (2024), "
-        "94.5% federated vs 96.7% centralised."
+def rung5_fedavg_gru(stations: list[StationData], model_cfg: dict,
+                     fed_cfg: dict, seed: int = 1337, **score_kwargs):
+    """§8.1 rung 5 — FedAvg over per-station GRUs. No spatial reasoning yet.
+
+    Federation without the graph layer, so the difference rung 6 makes is
+    attributable to the graph layer rather than to federation. Compare against
+    Khan et al. (2024): 94.5% federated vs 96.7% centralised.
+
+    Weight averaging requires one architecture, so clients share the feature
+    columns common to every station — the same constraint rung 3 has, and a
+    real cost of weight sharing worth reporting rather than hiding.
+    """
+    from src.federated.client import FederatedClient
+    from src.federated.server import run_federated_training
+
+    common, per_station_idx = align_features(stations)
+    target = stations[0].target
+    horizon = stations[0].splits["train"].horizon
+    log.info("rung 5: %d feature column(s) common to all %d client(s)",
+             len(common), len(stations))
+
+    # One config for every client: identical architecture is what makes the
+    # weights averageable at all.
+    client_cfg = dict(model_cfg["node_gru"])
+    client_cfg["train"] = dict(client_cfg.get("train", {}))
+    client_cfg["train"].update(fed_cfg.get("train", {}))
+
+    clients = [
+        FederatedClient(
+            station=st, feature_index=per_station_idx[st.station_id],
+            n_features=len(common), target_index=common.index(target),
+            horizon=horizon, model_cfg=client_cfg, seed=seed,
+        )
+        for st in stations
+    ]
+
+    global_weights, history = run_federated_training(
+        clients,
+        rounds=int(fed_cfg.get("rounds", 60)),
+        local_epochs=int(fed_cfg.get("local_epochs", 2)),
+        scheme=fed_cfg.get("aggregation", {}).get("scheme", "region_first"),
+        patience=int(fed_cfg.get("early_stopping_patience", 8)),
     )
+
+    records, thresholds = [], {}
+    for st, client in zip(stations, clients):
+        r, thr = score_station(
+            st, "5_fedavg_gru",
+            client.predict(global_weights, "val"),
+            client.predict(global_weights, "test"),
+            **score_kwargs,
+        )
+        records.append(r)
+        thresholds[("5_fedavg_gru", st.station_id)] = thr
+
+    return pd.concat(records, ignore_index=True), thresholds, history.as_dict()
 
 
 def rung6_proposed(*_args, **_kwargs):
@@ -414,6 +465,14 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         all_thresholds.update(thr)
         extras["rung3_history"] = hist
 
+    if 5 in rungs:
+        rec, thr, hist = rung5_fedavg_gru(
+            stations, model_cfg, load_config("federation"), seed=seed,
+            **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+        extras["rung5_history"] = hist
+
     if not all_records:
         raise ValueError(f"no rungs selected from {rungs}")
 
@@ -465,11 +524,12 @@ def main() -> None:
                     help="anomaly score form (default: configs/model.yaml)")
     args = ap.parse_args()
 
-    unsupported = [r for r in args.rungs if r not in (1, 2, 3)]
+    unsupported = [r for r in args.rungs if r not in (1, 2, 3, 5)]
     if unsupported:
         raise SystemExit(
-            f"rung(s) {unsupported} are Phase 2 (§8.1/§9). Rungs 1-3 must be "
-            "working and reported first."
+            f"rung(s) {unsupported} are not implemented yet. Rung 4 "
+            "(centralised ST-GNN) and rung 6 (server GNN + decision layer) are "
+            "still to build; see §8.1."
         )
 
     seed_everything(load_config("model").get("seed", 1337))
