@@ -715,3 +715,118 @@ pipeline does not do yet.
 4. `is_extreme` is a quantile proxy, not a confirmed event list (§11).
 5. Carried forward from entry 5: records now persisted (done), clean train
    (done), per-subtype table (done).
+
+---
+
+## [2026-10-12] entry 7 — the contamination hypothesis was wrong, and what actually blocks detection
+
+Entry 6 proposed that four of six fault types are invisible because the faulty
+values sit inside the model's own 24h input window, so the forecast follows the
+fault. `src/evaluation/temporal_reference.py` tested that with a reference the
+fault cannot reach — the median of `y(t−24k)`, k=1..7. Daily lags rather than a
+single week-ago value, because the diurnal cycle is near-universal while the
+weekly cycle is specific to traffic-driven cities, and India is the
+generalization target (§5.8). Parameter-free, per-station scaled, and rebuilt
+from the *injected* windows so the reference can itself be faulty as often as
+it would be live.
+
+**The hypothesis was wrong.** The uncontaminated reference fails on exactly the
+same four subtypes (local GRU, h=1): spike 0.694, noise 0.199, bias 0.005,
+drift 0.000, dropout 0.000, stuck-at 0.000. Contamination is not the binding
+constraint.
+
+### What is actually binding: the faults are inside the normal spread
+
+Per-hour score distributions on test, h=1, local GRU:
+
+| | threshold | normal median | normal p90 | normal p99 |
+|---|---|---|---|---|
+| model residual | 2.47 | 0.17 | 0.59 | 1.42 |
+| multi-lag reference | 3.34 | 0.36 | 1.22 | 2.45 |
+
+| subtype | residual median | % over threshold | reference median | % over threshold |
+|---|---|---|---|---|
+| spike | 3.24 | 57.2 | 5.29 | 65.3 |
+| noise | 2.14 | 41.4 | 1.83 | 22.9 |
+| bias | 0.31 | 0.0 | 1.39 | 0.7 |
+| dropout | 0.26 | 1.1 | 0.81 | 0.0 |
+| drift | — | — | 0.60 | 0.8 |
+| **stuck-at** | **0.12** | 0.0 | 0.32 | 0.0 |
+
+The four invisible subtypes produce scores **inside the distribution of normal
+readings**. Bias sits at the reference's 92nd percentile of normal; drift and
+stuck-at sit near its *median*. No threshold on a per-reading score can separate
+them, whatever the reference — that is why swapping the reference changed
+nothing. The limit is the signal, not the comparator.
+
+**The sharpest case: stuck-at scores 0.12 against a normal median of 0.17.** A
+frozen sensor is *more* predictable than a working one, so its residual is
+smaller than normal. An upper threshold cannot catch it in principle; the
+detector is looking in the wrong direction. Catching it needs a test for
+*abnormally low* variability, which is close to free and should be near-perfect
+(a stuck sensor has exactly zero variance over its episode).
+
+Also worth noting: dropout's absolute deviation is small because dropouts are
+not rare at night, when true NO2 is ~10 µg/m³ and dropping to zero is a ~0.45σ
+move, not the ~1.4σ a daytime dropout would give.
+
+### Accumulating evidence over time helps, for some subtypes
+
+Rolling mean of the score over k hours, then recalibrate (residual score,
+urban background):
+
+| subtype | k=1 | k=6 | k=12 | k=24 |
+|---|---|---|---|---|
+| bias | 0.021 | 0.048 | 0.063 | **0.153** |
+| dropout | 0.065 | 0.069 | 0.106 | **0.249** |
+| stuck-at | 0.000 | 0.004 | 0.013 | 0.026 |
+| drift | 0.000 | 0.069 | 0.000 | 0.000 |
+| noise | 0.634 | **0.779** | 0.742 | 0.667 |
+| spike | **0.716** | 0.661 | 0.616 | 0.502 |
+
+Bias improves 7× and dropout 4× — a persistent offset that is invisible in one
+hour becomes visible over a day. But spike *degrades* (0.716 → 0.502), because
+averaging dilutes a one-hour excursion. **No single timescale works for all
+subtypes**, which means the decision layer needs several, not a better choice
+of one.
+
+Drift stays at 0.000 at every timescale. Its episodes are ≥72h by construction
+and ramp linearly to 0.8–2.5σ, so the per-hour increment is ~0.03σ — below the
+noise floor at every window length tried, and the mean offset over any 24h slice
+is still small. Drift needs a *calibration* test over weeks, not an anomaly
+score over hours.
+
+### What this means for Phase 2 — read before building rung 6
+
+This is the main reason the diagnostic was worth 30 minutes. **Spatial agreement
+computed per reading will hit the same wall.** A 1σ offset is within normal
+*spatial* variability between stations just as it is within normal temporal
+variability, so a per-hour neighbour comparison will not separate bias, drift or
+stuck-at either. Building the graph layer and scoring it per reading would most
+likely reproduce the table above and look like a failure of the graph idea, when
+it would actually be a failure of the timescale.
+
+The design that follows from the measurements is a small ensemble over
+timescales and statistics, with spatial agreement supplying the reference where
+it is genuinely needed:
+
+1. **Per-reading residual** — keep for spike and noise, where it already works.
+2. **Low-variance test** — for stuck-at, which no upper threshold can reach.
+   Cheap, and should be near-perfect.
+3. **Windowed accumulation (~24h)** — for bias and dropout, worth 4–7× recall.
+4. **Long-window calibration comparison against neighbours (days to weeks)** —
+   for drift. This is where cross-station agreement is irreplaceable: a drifting
+   station cannot detect its own drift from its own history at any timescale,
+   because every reference it owns drifts with it. A neighbour's does not.
+
+Point 4 is the strongest argument yet for the §1.2 research gap — not that
+spatial reasoning improves accuracy, but that for drift it is the *only*
+available signal under the privacy constraint.
+
+### Open items
+
+1. Implement the four-part decision layer above; rung 6 should be evaluated at
+   the timescale each subtype needs, not one global per-reading threshold.
+2. Drift detection is unsolved and may stay that way — report honestly if so.
+3. Meteorology still disabled.
+4. India transfer still untestable (OpenAQ API key).
