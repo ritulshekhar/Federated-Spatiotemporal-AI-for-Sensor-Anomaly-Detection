@@ -830,3 +830,92 @@ available signal under the privacy constraint.
 2. Drift detection is unsolved and may stay that way — report honestly if so.
 3. Meteorology still disabled.
 4. India transfer still untestable (OpenAQ API key).
+
+---
+
+## [2026-10-12] entry 8 — ceiling test: neighbours *can* see what a station cannot
+
+`src/evaluation/spatial_reference.py` tests the assumption the project rests on
+(§1.2, §7.4), before any of rung 6 gets built. Deliberately the easy version —
+raw neighbour readings, centralised, no privacy constraint, no embedding
+compression, i.e. Ferrer-Cid et al. (2022). Whatever it scores is a **ceiling**
+for rung 6, and the gap between the two will be the measured price of the
+privacy constraint.
+
+Each station's series is z-scored on its own training window (§6.5 — no shared
+scaler), and its spatial deviation is the distance from the **median** of the
+other six at that hour. Median, not mean: at a 2.8% fault rate a neighbour is
+occasionally faulty itself.
+
+### Recall by subtype, by accumulation window
+
+| subtype | own residual | 1h | 6h | 24h | 72h | 168h |
+|---|---|---|---|---|---|---|
+| **drift** | **0.004** | 0.014 | 0.103 | **0.149** | 0.030 | 0.012 |
+| **bias** | **0.024** | 0.040 | **0.261** | 0.235 | 0.071 | 0.101 |
+| dropout | 0.081 | 0.046 | 0.144 | **0.228** | 0.026 | 0.037 |
+| stuck-at | 0.000 | 0.015 | 0.015 | 0.009 | **0.060** | 0.019 |
+| noise | **0.674** | 0.194 | 0.232 | 0.168 | 0.081 | 0.040 |
+| spike | **0.704** | 0.512 | 0.423 | 0.282 | 0.123 | 0.074 |
+
+**The central claim survives its first real test.** Drift goes from 0.004 to
+0.149 — a 37× improvement on the subtype that was previously untouchable at
+every temporal timescale. Bias goes 0.024 → 0.261, dropout 0.081 → 0.228. A
+neighbour genuinely sees what the station cannot, and entry 7's reasoning for
+why (every reference a drifting station owns drifts with it; a neighbour's does
+not) holds up in measurement.
+
+**And the two signals are complementary, not competing.** The station's own
+residual remains far better for the transient faults — spike 0.704 vs 0.512,
+noise 0.674 vs 0.232. Neither source dominates, which is exactly the shape
+entry 7's four-part design predicted, now with each part's role measured rather
+than assumed.
+
+**The accumulation window matters and is subtype-specific**: 6h for bias, 24h
+for drift and dropout, 1h for spike. Beyond 72h everything degrades, because
+the trailing mean washes out episodes that are shorter than the window.
+
+### The caveat, stated plainly: precision is poor
+
+| window | recall | precision | AUC-PR | fpr_on_extremes |
+|---|---|---|---|---|
+| 1h | 0.169 | 0.593 | 0.274 | 0.087 |
+| 6h | 0.262 | 0.270 | 0.163 | 0.060 |
+| 24h | 0.203 | 0.096 | 0.075 | 0.150 |
+
+At the 24h window where drift becomes visible, **precision is 0.096** — about
+nine in ten flags are false. Against a 2.8% base rate that is still 3.4× better
+than guessing, but it is nowhere near usable on its own. At 1h the spatial
+score is competitive with the residual (AUC-PR 0.274 for both) but catches
+different subtypes.
+
+So the honest reading: a neighbour comparison **recovers signal that does not
+otherwise exist**, at low precision. It is a component, not a detector. The
+ensemble has to combine it with the residual rather than replace one with the
+other, and the per-subtype windows above say how.
+
+One genuine positive: `fpr_on_extremes` stays low (0.060–0.150) across windows.
+A regional pollution episode lifts every station together, so differencing
+against neighbours cancels it — which is the §8.2 failure mode the whole
+project is trying to avoid, and the spatial signal is structurally resistant to
+it in a way a temporal one is not.
+
+### Limits of this ceiling
+
+- **Seven stations, all inside Barcelona**, a few km apart and strongly
+  correlated — close to the best case for neighbour comparison. A sparser
+  network would do worse, which matters for the India transfer (§5.8) where
+  station spacing and local source mix both differ.
+- Stuck-at is barely helped (0.000 → 0.060). It still needs the low-variance
+  test from entry 7; no reference-based score will find it.
+- This is the raw-data ceiling. Rung 6 must reproduce it from **compressed
+  embeddings**, and §11 flags that as untested. The gap is the experiment.
+
+### Open items
+
+1. Build rung 6 to the four-part design, evaluated per subtype at the window
+   each one needs — never one global per-reading threshold.
+2. Add the low-variance test for stuck-at (cheap, nothing else catches it).
+3. An ensemble combining residual + spatial, rather than either alone.
+4. Rungs 4 and 5 still to build (§8.1 order).
+5. Carried: meteorology disabled; India untestable without an OpenAQ key.
