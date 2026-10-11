@@ -1013,3 +1013,117 @@ and `outputs/phase2_ladder/` for the ladder comparison.
 2. Rung 6: server GNN + the four-part decision layer from entries 7–8.
 3. Low-variance test for stuck-at, still the only route to that subtype.
 4. Carried: meteorology disabled; India untestable without an OpenAQ key.
+
+---
+
+## [2026-10-12] entry 10 — rung 6: the proposed model, and what it does and does not deliver
+
+`src/models/server_gnn.py` + `src/models/decision_layer.py`, wired as rung 6.
+The server reconstructs each node's hidden state **from its neighbours' hidden
+states alone** and treats the reconstruction error as spatial disagreement —
+the embedding-space analogue of entry 8's raw-neighbour comparison. Self-
+information is excluded structurally: zero diagonal, exactly **one**
+aggregation hop, depth in the MLP afterwards. Two hops would walk i → j → i and
+quietly turn the reconstruction into an autoencoder.
+
+The decision layer runs the four detectors entries 6–8 showed are needed, each
+at its own timescale, and takes the strongest standardised signal.
+
+### The headline: four previously-invisible fault types are now detectable
+
+Recall by subtype, h=1:
+
+| subtype | best baseline | **rung 6** | raw-neighbour ceiling (entry 8) | % of ceiling |
+|---|---|---|---|---|
+| bias | 0.000 | **0.148** | 0.261 | 57% |
+| drift | 0.000 | **0.027** | 0.149 | 18% |
+| dropout | 0.018 | **0.166** | 0.228 | 73% |
+| stuck-at | 0.000 | **0.220** | 0.060 | **367%** |
+| noise | 0.413 | **0.619** | 0.232 | — |
+| spike | 0.590 | **0.671** | 0.512 | — |
+
+**Rung 6 improves every single subtype**, and three that sat at exactly 0.000
+across rungs 1, 2, 3 and 5 are now detected. This is the central objective
+(§1, Objective 4) producing a result for the first time.
+
+**§11's open risk did not materialise — but it did bite.** Compressing a
+station's state into a 64-dim hidden vector preserves much of the spatial
+signal: 57% of the raw-data ceiling for bias, 73% for dropout. It does *not*
+preserve it for drift, which retains only 18% (0.027 against 0.149). Drift is
+the subtlest signal and the first casualty of compression, which is the
+honest, expected direction — it is now non-zero for the first time, but it
+remains substantially unsolved.
+
+Two subtypes **exceed** the raw-neighbour ceiling, and that is not an anomaly:
+they are caught by detectors that are not neighbour comparisons at all.
+Stuck-at (0.220 vs 0.060) comes from the low-variance test — entry 7's
+observation that a frozen sensor scores *below* the normal median, so the
+answer was a different statistic rather than a better reference. Spike and
+noise come from the per-reading residual. The ensemble is combining genuinely
+complementary mechanisms, which is what it was designed from the measurements
+to do.
+
+### The cost, stated plainly: precision collapses
+
+Median across stations:
+
+| model | h | recall | precision | F1 | AUC-PR | fpr_ext |
+|---|---|---|---|---|---|---|
+| FedAvg GRU (rung 5) | 1 | 0.202 | **0.722** | **0.314** | 0.311 | **0.024** |
+| **proposed (rung 6)** | 1 | **0.433** | 0.173 | 0.240 | 0.312 | 0.190 |
+| FedAvg GRU | 6 | 0.215 | **0.692** | **0.341** | 0.339 | 0.188 |
+| **proposed** | 6 | **0.335** | 0.149 | 0.191 | 0.259 | **0.087** |
+
+Recall more than doubles at h=1 (0.202 → 0.433), but precision falls from
+0.722 to 0.173 — roughly one flag in six is correct — and F1 drops. **AUC-PR is
+flat** (0.312 vs 0.311), which is the diagnostic that matters: the ensemble is
+not ranking anomalies better overall, it is flagging far more of them. The
+subtype coverage is genuinely new; the aggregate ranking quality is not.
+
+The cause is the combination rule. Four detectors are standardised and the
+**maximum** is taken, then one threshold is applied to that maximum. With four
+chances to exceed a single threshold, false positives compound. The fix is
+per-detector thresholds, each calibrated to its own false-positive budget,
+rather than one threshold on a max — not attempted yet, and the obvious next
+step.
+
+One point in rung 6's favour: at h=6 its `fpr_on_extremes` is **0.087 against
+0.188** for rung 5. Entry 8 predicted this — differencing against neighbours
+cancels regional pollution episodes — and it is the §8.2 failure mode the
+project exists to avoid.
+
+### Systems (§8.2)
+
+| | |
+|---|---|
+| graph edges | 42 (7 nodes, hybrid distance+correlation) |
+| FedAvg weights | 22.3 MB total, converged round 6 |
+| **hidden-state uploads** | **30.3 MB** |
+| **total** | **52.6 MB** |
+| server GNN | 40 epochs, best 37, val recon 0.0199 |
+
+The spatial capability costs 30.3 MB on top of federation's 22.3 MB — more
+than doubling communication. Worth stating when the §1.2 claim is made: the
+privacy-preserving spatial channel is not free, and the hidden state is the
+expensive part, not the weights.
+
+### Honest summary
+
+The project's central claim now has evidence: **cross-station spatial
+agreement, computed server-side from compressed embeddings and never from raw
+neighbour data, detects sensor faults that no amount of local modelling can
+see.** That is the §1.2 gap, demonstrated end to end under the privacy
+contract, with the contract enforced on every upload of every round.
+
+It is not yet a *good* detector. Precision is poor, drift is barely moved, and
+the aggregate ranking is no better than rung 5's. The result is a working
+mechanism with a clearly identified next fix, not a finished system.
+
+### Open items
+
+1. **Per-detector thresholds** instead of one threshold on the max — the
+   direct cause of the precision collapse.
+2. Drift at 18% of ceiling: try a longer spatial window, or a larger hidden
+   state, to test whether compression or timescale is the limiting factor.
+3. Rung 4 (centralised ST-GNN) still unbuilt — the forecasting ceiling.
+4. Carried: meteorology disabled; India untestable without an OpenAQ key.

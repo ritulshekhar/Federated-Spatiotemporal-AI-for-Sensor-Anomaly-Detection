@@ -24,7 +24,7 @@ possible.
 | Phase | State |
 |---|---|
 | **1** — data pipeline, preprocessing, baseline rungs 1–3 | Complete, on real EEA data |
-| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Rung 5 (FedAvg + GRU) done; rungs 4 and 6 to build |
+| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Rungs 5 and 6 done; rung 4 (forecasting ceiling) to build |
 | **3** — dashboard, India generalization experiment | Acquisition + schema verified; not wired in |
 
 ### What the real data looks like
@@ -60,6 +60,29 @@ residuals on genuine extremes too.
 That is the gap rung 6 exists to close: **hold recall, cut
 `fpr_on_extremes`**, using cross-station spatial agreement to tell "unusual"
 from "wrong".
+
+### Rung 6 — the proposed model (`outputs/phase2_rung6/`)
+
+Recall by fault subtype at h=1, against the best of rungs 1–5:
+
+| subtype | best baseline | **rung 6** |
+|---|---|---|
+| bias | 0.000 | **0.148** |
+| drift | 0.000 | **0.027** |
+| dropout | 0.018 | **0.166** |
+| stuck-at | 0.000 | **0.220** |
+| noise | 0.413 | **0.619** |
+| spike | 0.590 | **0.671** |
+
+Three fault types that were at exactly zero across every other rung are now
+detected. Spatial agreement is computed server-side from **compressed
+embeddings only** — never from raw neighbour data — which is the §1.2 gap,
+demonstrated under the privacy contract.
+
+**With an honest caveat:** aggregate precision falls from 0.722 to 0.173 and
+AUC-PR is flat, because four detectors are combined by taking a maximum
+against a single threshold. The subtype coverage is real; the aggregate
+ranking is not yet better. See `CONTEXT.md` entry 10.
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 
