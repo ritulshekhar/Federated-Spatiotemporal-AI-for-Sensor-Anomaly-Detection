@@ -42,6 +42,7 @@ from src.evaluation.metrics import (
     calibrate_threshold, extreme_mask, residual_score, volatility_scaled_score,
 )
 from src.evaluation.report import build_report, make_records
+from src.models.decision_layer import DecisionLayer
 from src.preprocessing.normalize import LocalScaler
 from src.preprocessing.windowing import SPLITS, WindowSet, load_windows
 from src.utils.logging_setup import get_logger
@@ -108,6 +109,31 @@ def load_region(region: str, variant: str = "") -> list[StationData]:
 # Shared scoring path — every rung goes through this, so no rung can quietly
 # use a different threshold rule or skip the false-positive control.
 # ---------------------------------------------------------------------------
+def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
+                     spatial_series: pd.Series | None, fit: bool) -> np.ndarray:
+    """Run the decision-layer ensemble per horizon, returning (n_windows, horizon).
+
+    Each horizon is a separate stride-1 time series, so its rolling statistics
+    are computed on its own index and never blended with another horizon's.
+    """
+    residuals = np.abs(pred_raw - ws.y_raw) / max(scale, 1e-8)
+    out = np.empty_like(residuals, dtype=float)
+
+    spatial_by_t0 = (spatial_series.reindex(pd.DatetimeIndex(ws.t0)).to_numpy()
+                     if spatial_series is not None else None)
+
+    for j, layer in enumerate(layers):
+        index = pd.DatetimeIndex(ws.t_target[:, j])
+        frame = pd.DataFrame(
+            {"residual": residuals[:, j], "y_true": ws.y_raw[:, j]}, index=index)
+        if spatial_by_t0 is not None:
+            frame["spatial"] = spatial_by_t0
+        ordered = frame.sort_index()
+        scored = layer.score(ordered, fit_scales=fit)
+        out[:, j] = pd.Series(scored.combined, index=ordered.index).reindex(index).to_numpy()
+    return out
+
+
 def score_station(station: StationData, model_name: str,
                   pred_val_norm: np.ndarray, pred_test_norm: np.ndarray,
                   extreme_quantile: float = 0.95,
@@ -116,7 +142,9 @@ def score_station(station: StationData, model_name: str,
                   label_source: str = "auto",
                   score_mode: str = "volatility",
                   volatility_floor: float = 0.25,
-                  target_fpr_extremes: float = 0.10) -> tuple[pd.DataFrame, float]:
+                  target_fpr_extremes: float = 0.10,
+                  spatial: dict[str, pd.Series] | None = None,
+                  ) -> tuple[pd.DataFrame, float]:
     """Turn one station's forecasts into prediction records and a threshold.
 
     The threshold is calibrated on that station's **validation** split, never on
@@ -135,7 +163,16 @@ def score_station(station: StationData, model_name: str,
     val_pred_raw = station.y_pred_raw(pred_val_norm)
     test_pred_raw = station.y_pred_raw(pred_test_norm)
 
-    if score_mode == "volatility":
+    if spatial is not None:
+        # Rung 6: the four-detector ensemble, fitted on validation and applied
+        # to test. One DecisionLayer per horizon, because each horizon is its
+        # own time-ordered series and the rolling statistics must not mix them.
+        layers = [DecisionLayer() for _ in range(val.horizon)]
+        val_score = _decision_scores(layers, val, val_pred_raw, scale,
+                                     spatial.get("val"), fit=True)
+        test_score = _decision_scores(layers, test, test_pred_raw, scale,
+                                      spatial.get("test"), fit=False)
+    elif score_mode == "volatility":
         val_score = volatility_scaled_score(
             val.y_raw, val_pred_raw, val_vol[:, None], vol_floor)
         test_score = volatility_scaled_score(
@@ -408,13 +445,129 @@ def rung5_fedavg_gru(stations: list[StationData], model_cfg: dict,
     return pd.concat(records, ignore_index=True), thresholds, history.as_dict()
 
 
-def rung6_proposed(*_args, **_kwargs):
-    raise NotImplementedError(
-        "Rung 6 (federated GRU + server GNN + decision layer) is the proposed "
-        "model, Phase 2. Its spatial_agreement() has no direct precedent "
-        "computing agreement from compressed embeddings (§11) — expect real "
-        "experimentation and report negative results honestly."
+def _aligned_hidden_states(clients, global_weights, split: str):
+    """(n_windows, n_stations, hidden) over window origins common to all stations.
+
+    Stations have different coverage, so the server can only reason about hours
+    every node actually reported. The intersection of ``t0`` is that set.
+    """
+    per_station, t0s = {}, []
+    for c in clients:
+        ws = c.station.splits[split]
+        c.trainer.set_weights(global_weights)
+        per_station[c.station_id] = (ws.t0, c.trainer.embed(c.X(split)))
+        t0s.append(ws.t0)
+
+    common = t0s[0]
+    for t in t0s[1:]:
+        common = np.intersect1d(common, t)
+    if common.size == 0:
+        raise ValueError(f"no window origins common to all stations in {split!r}")
+
+    stacked = []
+    for c in clients:
+        t0, emb = per_station[c.station_id]
+        order = np.argsort(t0)
+        pos = np.searchsorted(t0[order], common)
+        stacked.append(emb[order[pos]])
+    return np.stack(stacked, axis=1), common
+
+
+def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
+                   seed: int = 1337, **score_kwargs):
+    """§8.1 rung 6 — the proposed model: federated GRU + server GNN + decision layer.
+
+    §11 flags `spatial_agreement()` from compressed embeddings as untested;
+    entry 8 measured the raw-neighbour ceiling it has to reach for (drift
+    0.149, bias 0.261). Whatever the gap turns out to be *is* the result.
+    """
+    from src.federated.client import FederatedClient
+    from src.federated.server import run_federated_training
+    from src.models.server_gnn import (
+        NeighbourReconstructor, build_adjacency, spatial_disagreement,
+        train_reconstructor,
     )
+    from src.data.station_metadata import coordinates
+
+    common, per_station_idx = align_features(stations)
+    target = stations[0].target
+    horizon = stations[0].splits["train"].horizon
+
+    client_cfg = dict(model_cfg["node_gru"])
+    client_cfg["train"] = dict(client_cfg.get("train", {}))
+    client_cfg["train"].update(fed_cfg.get("train", {}))
+    clients = [
+        FederatedClient(
+            station=st, feature_index=per_station_idx[st.station_id],
+            n_features=len(common), target_index=common.index(target),
+            horizon=horizon, model_cfg=client_cfg, seed=seed,
+        )
+        for st in stations
+    ]
+
+    # --- the federated forecaster, identical to rung 5 ----------------------
+    global_weights, fed_history = run_federated_training(
+        clients,
+        rounds=int(fed_cfg.get("rounds", 60)),
+        local_epochs=int(fed_cfg.get("local_epochs", 2)),
+        scheme=fed_cfg.get("aggregation", {}).get("scheme", "region_first"),
+        patience=int(fed_cfg.get("early_stopping_patience", 8)),
+    )
+
+    # --- the server tier: hidden states only (§7.2) -------------------------
+    H = {s: _aligned_hidden_states(clients, global_weights, s)
+         for s in ("train", "val", "test")}
+    station_ids = [c.station_id for c in clients]
+    gcfg = model_cfg["server_gnn"]
+
+    adjacency = build_adjacency(
+        station_ids, coordinates(), mode=gcfg["graph"]["mode"],
+        distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
+        hidden_states=H["train"][0],
+        correlation_threshold=gcfg["graph"]["correlation_threshold"],
+    )
+    reconstructor = NeighbourReconstructor(
+        hidden_size=H["train"][0].shape[2], adjacency=adjacency,
+        embed_size=gcfg["hidden_size"], num_layers=gcfg["num_layers"],
+        dropout=gcfg["dropout"],
+    )
+    gnn_history = train_reconstructor(reconstructor, H["train"][0], H["val"][0])
+
+    metric = model_cfg["decision_layer"]["spatial_agreement"]["metric"]
+    disagreement = {
+        split: (spatial_disagreement(reconstructor, H[split][0], metric=metric),
+                H[split][1])
+        for split in ("val", "test")
+    }
+
+    # Hidden-state uploads are real communication cost (§8.2).
+    hidden_mb = sum(H[s][0].nbytes for s in ("val", "test")) / 1e6
+
+    records, thresholds = [], {}
+    for i, (st, client) in enumerate(zip(stations, clients)):
+        spatial = {
+            split: pd.Series(disagreement[split][0][:, i],
+                             index=pd.DatetimeIndex(disagreement[split][1]))
+            for split in ("val", "test")
+        }
+        r, thr = score_station(
+            st, "6_proposed",
+            client.predict(global_weights, "val"),
+            client.predict(global_weights, "test"),
+            spatial=spatial, **score_kwargs,
+        )
+        records.append(r)
+        thresholds[("6_proposed", st.station_id)] = thr
+
+    history = {
+        "federated": fed_history.as_dict(),
+        "server_gnn": gnn_history.as_dict(),
+        "graph_edges": int(adjacency.sum()),
+        "hidden_state_upload_mb": round(hidden_mb, 3),
+        "attention": reconstructor.attention().detach().cpu().numpy().round(3).tolist(),
+        "station_order": station_ids,
+    }
+    return pd.concat(records, ignore_index=True), thresholds, history
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +626,14 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         all_thresholds.update(thr)
         extras["rung5_history"] = hist
 
+    if 6 in rungs:
+        rec, thr, hist = rung6_proposed(
+            stations, model_cfg, load_config("federation"), seed=seed,
+            **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+        extras["rung6_history"] = hist
+
     if not all_records:
         raise ValueError(f"no rungs selected from {rungs}")
 
@@ -524,12 +685,12 @@ def main() -> None:
                     help="anomaly score form (default: configs/model.yaml)")
     args = ap.parse_args()
 
-    unsupported = [r for r in args.rungs if r not in (1, 2, 3, 5)]
+    unsupported = [r for r in args.rungs if r not in (1, 2, 3, 5, 6)]
     if unsupported:
         raise SystemExit(
             f"rung(s) {unsupported} are not implemented yet. Rung 4 "
-            "(centralised ST-GNN) and rung 6 (server GNN + decision layer) are "
-            "still to build; see §8.1."
+            "(centralised ST-GNN, the accuracy ceiling) is still to build; "
+            "see §8.1."
         )
 
     seed_everything(load_config("model").get("seed", 1337))
