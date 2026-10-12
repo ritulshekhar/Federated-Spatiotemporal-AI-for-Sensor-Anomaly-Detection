@@ -63,9 +63,73 @@ def test_weights_always_sum_to_one():
         assert sum(w) == pytest.approx(1.0)
 
 
-def test_clustered_is_refused_until_region_first_proves_insufficient():
-    with pytest.raises(NotImplementedError, match="Phase 3"):
+def test_clustered_refuses_to_invent_an_assignment():
+    with pytest.raises(ValueError, match="needs a cluster assignment"):
         _weights([("A", "catalonia", 1)], "clustered")
+
+
+def test_clustered_refuses_a_partial_assignment():
+    ups = [_Up("A", "catalonia", 1), _Up("B", "catalonia", 1)]
+    with pytest.raises(ValueError, match=r"no cluster assigned.*\['B'\]"):
+        aggregation_weights(ups, "clustered", clusters={"A": 0})
+
+
+def test_clustered_stops_a_crowded_community_outvoting_a_lone_station():
+    """The §5.7 failure mode one level down from regions.
+
+    Four city-centre stations behaving alike must not outvote a single rural
+    one four to one simply by being numerous — that is the same argument that
+    made region_first the default, applied inside a region.
+    """
+    ups = [_Up("C1", "catalonia", 100), _Up("C2", "catalonia", 100),
+           _Up("C3", "catalonia", 100), _Up("C4", "catalonia", 100),
+           _Up("R1", "catalonia", 100)]
+    clusters = {"C1": 0, "C2": 0, "C3": 0, "C4": 0, "R1": 1}
+    w = aggregation_weights(ups, "clustered", clusters=clusters)
+
+    assert sum(w[:4]) == pytest.approx(0.5)
+    assert w[4] == pytest.approx(0.5)
+    # region_first, the alternative, would have given the rural station 0.2.
+    assert w[4] > _weights([(u.station_id, u.region, u.n_samples) for u in ups],
+                           "region_first")[4]
+
+
+def test_clustered_nests_inside_regions_and_cannot_undo_the_region_split():
+    """§5.7's region guarantee survives clustering, however the clusters fall.
+
+    A region carved into many small communities must still carry exactly its
+    1/n_regions share — otherwise turning clustering on would silently hand
+    the finely-divided region the majority region_first denied it.
+    """
+    ups = [_Up("A1", "catalonia", 1), _Up("A2", "catalonia", 1),
+           _Up("A3", "catalonia", 1), _Up("A4", "catalonia", 1),
+           _Up("B1", "india", 1)]
+    w = aggregation_weights(
+        ups, "clustered",
+        clusters={"A1": 0, "A2": 1, "A3": 2, "A4": 3, "B1": 4},
+    )
+    assert sum(w[:4]) == pytest.approx(0.5)
+    assert w[4] == pytest.approx(0.5)
+
+
+def test_clustering_groups_by_proximity_and_refuses_to_guess_without_inputs():
+    """Clusters come from public coordinates, never from raw series (§2.4)."""
+    from src.federated.aggregation_weights import cluster_assignments
+
+    # Two tight city pairs ~40 km apart, plus one distant station.
+    coords = {"A1": (41.40, 2.15), "A2": (41.41, 2.16),
+              "B1": (41.75, 2.60), "B2": (41.76, 2.61),
+              "C1": (42.60, 0.80)}
+    ups = [_Up(s, "catalonia", 1) for s in coords]
+
+    assigned = cluster_assignments(ups, coords=coords, n_clusters=3)
+    assert assigned["A1"] == assigned["A2"]
+    assert assigned["B1"] == assigned["B2"]
+    assert len({assigned[s] for s in coords}) == 3
+    assert assigned["C1"] not in (assigned["A1"], assigned["B1"])
+
+    with pytest.raises(ValueError, match="has neither"):
+        cluster_assignments(ups, n_clusters=3)
 
 
 def test_unknown_scheme_raises():

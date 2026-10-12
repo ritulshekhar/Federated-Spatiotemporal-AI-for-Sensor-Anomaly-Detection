@@ -23,7 +23,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.federated.aggregation_weights import aggregation_weights, describe
+from src.federated.aggregation_weights import (
+    aggregation_weights, cluster_assignments, describe,
+)
 from src.federated.client import FederatedClient, Upload
 from src.utils.logging_setup import get_logger
 
@@ -66,21 +68,52 @@ class FederatedHistory:
         }
 
 
+def resolve_clusters(clients: list[FederatedClient], scheme: str,
+                     clusters: dict[str, int] | None,
+                     ) -> dict[str, int] | None:
+    """Settle the community assignment once, before the first round.
+
+    Only ``clustered`` needs one. When the caller does not supply it, it is
+    built from the public EEA station-registry coordinates — which are not
+    observations and so cost nothing against §2.4. Hidden-state embeddings
+    would sharpen it (see ``cluster_assignments``) but do not exist yet at this
+    point in the run, and clustering on round-1 states of an untrained encoder
+    would be noise dressed up as structure.
+    """
+    if scheme != "clustered" or clusters is not None:
+        return clusters
+    from src.data.station_metadata import coordinates
+    from src.utils.paths import load_config
+
+    cfg = (load_config("federation").get("aggregation", {})
+           .get("clustered", {}) or {})
+    return cluster_assignments(
+        clients, coords=coordinates(),
+        n_clusters=cfg.get("n_clusters"),
+        spatial_weight=float(cfg.get("spatial_weight", 0.5)),
+    )
+
+
 class FederatedServer:
     """FedAvg over per-node GRU weights (§7.2)."""
 
     def __init__(self, initial_weights: dict[str, torch.Tensor],
-                 scheme: str = "region_first"):
+                 scheme: str = "region_first",
+                 clusters: dict[str, int] | None = None):
         self.global_weights = {k: v.detach().clone()
                                for k, v in initial_weights.items()}
         self.scheme = scheme
+        # Assigned once, before round 1, and held fixed. Re-clustering every
+        # round would make the weighting a moving target and the rounds
+        # incomparable.
+        self.clusters = clusters
         self.history = FederatedHistory()
 
     def aggregate(self, uploads: list[Upload]) -> dict[str, torch.Tensor]:
         """Weighted average of the uploaded weights (§5.7 for the weights)."""
         if not uploads:
             raise ValueError("a round produced no uploads")
-        weights = aggregation_weights(uploads, self.scheme)
+        weights = aggregation_weights(uploads, self.scheme, clusters=self.clusters)
 
         new_global: dict[str, torch.Tensor] = {}
         for key in self.global_weights:
@@ -106,6 +139,7 @@ def run_split_learning(
     local_epochs: int = 2,
     scheme: str = "region_first",
     patience: int = 8,
+    clusters: dict[str, int] | None = None,
 ) -> tuple[dict[str, torch.Tensor], FederatedHistory]:
     """§7.3 in full: weights up, hidden states up, embeddings **back down**.
 
@@ -129,12 +163,13 @@ def run_split_learning(
     if not clients:
         raise ValueError("no clients")
 
-    server = FederatedServer(clients[0].trainer.get_weights(), scheme=scheme)
+    server = FederatedServer(clients[0].trainer.get_weights(), scheme=scheme,
+                             clusters=resolve_clusters(clients, scheme, clusters))
     best_weights = {k: v.clone() for k, v in server.global_weights.items()}
     stale = 0
 
-    log.info("split learning: %d clients, <=%d rounds x %d local epochs",
-             len(clients), rounds, local_epochs)
+    log.info("split learning: %d clients, <=%d rounds x %d local epochs, "
+             "weighting=%s", len(clients), rounds, local_epochs, scheme)
 
     for rnd in range(rounds):
         uploads = [c.local_train(server.global_weights, local_epochs)
@@ -192,6 +227,7 @@ def run_federated_training(
     scheme: str = "region_first",
     patience: int = 8,
     log_every: int = 1,
+    clusters: dict[str, int] | None = None,
 ) -> tuple[dict[str, torch.Tensor], FederatedHistory]:
     """The §7.3 loop. Returns the best global weights and the run history.
 
@@ -203,7 +239,8 @@ def run_federated_training(
     if not clients:
         raise ValueError("no clients")
 
-    server = FederatedServer(clients[0].trainer.get_weights(), scheme=scheme)
+    server = FederatedServer(clients[0].trainer.get_weights(), scheme=scheme,
+                             clusters=resolve_clusters(clients, scheme, clusters))
     best_weights = {k: v.clone() for k, v in server.global_weights.items()}
     stale = 0
 
@@ -214,7 +251,8 @@ def run_federated_training(
         uploads = [c.local_train(server.global_weights, local_epochs)
                    for c in clients]
         if rnd == 0:
-            log.info("client weights -> %s", describe(uploads, scheme))
+            log.info("client weights -> %s",
+                     describe(uploads, scheme, clusters=server.clusters))
 
         uplink = sum(u.payload_bytes() for u in uploads)
         downlink = server.broadcast_bytes(len(clients))

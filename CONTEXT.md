@@ -1775,3 +1775,108 @@ binding constraint on fault detection — a better forecaster tracks faults more
 faithfully and *shrinks* the residuals — so a 2-3% RMSE improvement should not
 be expected to move the subtype recalls, and this run was not asked to.
 Objective 3 is now met; objective 4 is unaffected.
+
+---
+
+## [2026-10-13] entry 19 — the drift injector was wrong twice, and clustered aggregation lands
+
+Two items from the remaining-work list, both code-only, done while the
+69-station scale run occupies the machine. No measurement yet: both change what
+future runs produce, neither re-measures anything on its own.
+
+### The drift injector was wrong in two independent ways
+
+Entry 17 measured real co-located sensors drifting at about **0.01 sigma per 72
+hours**. The injector drew a fixed **0.8-2.5 sigma total per episode**,
+independent of how long the episode lasted. So:
+
+1. **It was about a hundred times too fast.** Every drift number this project
+   has reported — including the zeros at the alert operating point (entry 14) —
+   was measured against a fault far coarser than any real instrument produces.
+   The zeros are therefore *optimistic*: the detector failed to catch drift
+   that was two orders of magnitude more obvious than the real thing.
+2. **It was backwards in duration.** A fixed total spread over a longer episode
+   is a *slower* drift. The longest episodes — the hardest cases, and the ones
+   the real `Validity` duration distribution produces most of once clipped to
+   drift's 72h floor — were the gentlest the injector made.
+
+Drift is now parameterised by **rate**, in sigma per 72 hours, and magnitude
+scales with episode length: `magnitude = rate * (hours / 72) * sigma`.
+
+The rate is sampled **log-uniformly** over `[0.01, 2.0]`, configurable at
+`preprocessing.fault_injection.drift_sigma_per_72h`. Log-uniform rather than
+uniform, deliberately: uniform sampling over that range puts half the episodes
+above 1 sigma/72h and almost none near the measured real rate, which would
+leave the per-magnitude recall table (entry 14) silent about precisely the band
+the detector cannot reach. Log-uniform gives each decade equal mass.
+
+The lower bound is the measured rate, but note what that measurement bounds:
+the CAPTOR deployment contains **no failed instrument**, so 0.01 sigma/72h is
+how fast a *working* sensor drifts. A faulting one drifts faster, by an unknown
+factor. The range is therefore a floor on realism, not a claim about faulty
+hardware — the honest reading of the low end is "indistinguishable from a
+healthy sensor", which is why it belongs in the sample rather than being
+excluded as unfair.
+
+The rate used is now carried in `InjectionReport` (`drift_sigma_lo/hi`), so
+reports produced before and after this change stay distinguishable. **Every
+drift figure in `outputs/` predates it**, including the dashboard's "drift
+remains unsolved" finding, whose caveat ("real drift is ~30x slower") was
+understating the gap and is now measured as ~100x.
+
+The 7-station processed build has been regenerated with the corrected injector;
+injection still rate-matches (0.0281 achieved against 0.0280 target) with even
+per-type budgets. The 69-station build predates it and was not rebuilt — an
+18-hour run was in flight on it.
+
+### Clustered aggregation (§5.7, Hammad et al. 2026) — implemented
+
+`aggregation_weights` had raised `NotImplementedError` on `clustered` with the
+reasoning that §5.7 says to reach for it only once `region_first` proves
+insufficient. The scale-up is what makes it insufficient: **with a single
+region, `region_first` degenerates to uniform**, so across 69 Catalan stations
+it provides no structure at all, and a dense cluster of city-centre traffic
+sites outvotes a lone rural station purely by being numerous. That is the exact
+argument that made `region_first` the default, one level down.
+
+Two design decisions worth recording.
+
+**What it is allowed to cluster on is a privacy question before a modelling
+one.** Hammad builds communities from temporal correlation plus spatial
+proximity, and temporal correlation between two stations ordinarily means
+comparing their two raw series — which §2.4 forbids outright. Neither input
+here is raw data: coordinates are public EEA station-registry metadata, and
+encoder hidden states are already uploaded under §7.1/§7.2 to run the graph
+network, so clustering on them discloses nothing new. Raw-series correlation is
+not offered as an option, in config or in code.
+
+In practice the default path uses **coordinates only**, because clusters are
+settled once before round 1 and the round-1 hidden states of an untrained
+encoder would be noise dressed up as structure. The embedding path exists and
+is tested, for a later run that clusters from a trained encoder.
+
+**Communities nest inside regions rather than replacing them.** A region carved
+into many small communities would otherwise reclaim the majority `region_first`
+deliberately denied it — switch the scheme on and the §5.7 guarantee quietly
+evaporates. So each region still carries `1/n_regions`, each community an equal
+share of its region, each station an equal share of its community. There is a
+test asserting exactly this, because the failure would be silent.
+
+Cluster count defaults to `sqrt(stations in region)` — 8 communities at 69
+stations, 3 at 7 — which is a heuristic and is labelled as one. On the real
+7-station set it produces sizes [2, 4, 1], moving the lone station from 0.143
+under `region_first` to 0.333.
+
+### Still not done, and why
+
+- **A drift-sensitive signal across the privacy boundary** — blocked on an
+  owner decision, not on code. Entry 15 established the bottleneck is that the
+  node's own residual cannot see drift; the candidate fix sends a small signed
+  summary of the station's normalised level deviation, which is a §2.4 change
+  and therefore not mine to make.
+- **India/CPCB** — blocked on a free `OPENAQ_API_KEY`. Schema verified, code
+  written, zero Indian rows fetched.
+- **Re-running the ladder on the corrected injector** — queued behind the scale
+  run. Memory, not CPU, is the binding constraint: 1.6 GB free against a job
+  holding 1.7 GB, so starting a second training run risks OOM-killing an
+  18-hour one.

@@ -28,11 +28,25 @@ train:
 # evenly among that region's own stations.
 aggregation:
   scheme: region_first        # region_first | sample_count | uniform | clustered
-  # clustered = Hammad et al. (2026) Communities of Interest. Phase 3+ stretch,
-  # only if region_first proves insufficient.
+  # clustered = Hammad et al. (2026) Communities of Interest. The §5.7 stretch
+  # version, now implemented: with a single region, region_first degenerates to
+  # uniform, so at 69 Catalan stations a dense cluster of city-centre traffic
+  # sites outvotes a lone rural one simply by being numerous. Communities are
+  # nested INSIDE regions, so turning this on cannot undo the region guarantee
+  # above.
   clustered:
-    n_clusters: 3
-    features: [temporal_correlation, spatial_proximity, region]
+    # null = sqrt(stations in region), rounded: 8 communities at 69 stations,
+    # 3 at 7. A fixed number applies to every region regardless of its size.
+    n_clusters: null
+    # How much geography counts against learned behaviour when both are
+    # available. 1.0 = proximity only, 0.0 = embedding similarity only.
+    spatial_weight: 0.5
+    # What it is permitted to cluster ON. Both are already server-side:
+    # coordinates are public EEA registry metadata, and hidden states are
+    # uploaded anyway under §7.1/§7.2 for the graph network. Raw series
+    # correlation — Hammad's own input — would violate §2.4 and is not an
+    # option here. See src/federated/aggregation_weights.cluster_assignments.
+    features: [spatial_proximity, encoder_hidden_state, region]
 
 # ---------------------------------------------------------------------------
 # Privacy contract (CLAUDE.md §2.4, §7.1) — enforced in code, not by convention
