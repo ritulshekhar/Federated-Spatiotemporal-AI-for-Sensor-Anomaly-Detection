@@ -604,8 +604,67 @@ def _aligned_hidden_states(clients, global_weights, split: str):
     return np.stack(stacked, axis=1), common
 
 
+def _make_embedder(reconstructor_holder: dict, gcfg: dict, station_ids: list[str],
+                   coords: dict, gnn_epochs: int):
+    """Build the server-side pass used by `run_split_learning`.
+
+    Each round: collect hidden states on the common timeline, refresh the
+    neighbour-reconstruction model, and scatter its embeddings back into every
+    station's own window order. Windows outside the common timeline receive
+    zeros, which the node's fusion layer reads as "no neighbourhood context".
+    """
+    import torch
+
+    from src.models.server_gnn import NeighbourReconstructor, build_adjacency, train_reconstructor
+
+    def embed_fn(clients, global_weights):
+        hidden, positions, bytes_up = {}, {}, 0
+        for split in ("train", "val", "test"):
+            H, common = _aligned_hidden_states(clients, global_weights, split)
+            hidden[split] = H
+            bytes_up += H.nbytes
+            positions[split] = {}
+            for c in clients:
+                t0 = c.station.splits[split].t0
+                order = np.argsort(t0)
+                positions[split][c.station_id] = order[np.searchsorted(t0[order], common)]
+
+        if reconstructor_holder.get("model") is None:
+            adjacency = build_adjacency(
+                station_ids, coords, mode=gcfg["graph"]["mode"],
+                distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
+                hidden_states=hidden["train"],
+                correlation_threshold=gcfg["graph"]["correlation_threshold"],
+            )
+            reconstructor_holder["model"] = NeighbourReconstructor(
+                hidden_size=hidden["train"].shape[2], adjacency=adjacency,
+                embed_size=gcfg["hidden_size"], num_layers=gcfg["num_layers"],
+                dropout=gcfg["dropout"])
+            reconstructor_holder["adjacency"] = adjacency
+
+        model = reconstructor_holder["model"]
+        train_reconstructor(model, hidden["train"], hidden["val"],
+                            epochs=gnn_epochs, patience=gnn_epochs)
+
+        out = {}
+        for split, H in hidden.items():
+            with torch.no_grad():
+                _, emb = model(torch.from_numpy(np.ascontiguousarray(H, dtype=np.float32)))
+            emb = emb.cpu().numpy()
+            out[split] = {}
+            for i, c in enumerate(clients):
+                full = np.zeros((len(c.station.splits[split]), emb.shape[2]),
+                                dtype=np.float32)
+                full[positions[split][c.station_id]] = emb[:, i, :]
+                out[split][c.station_id] = full
+        return out, bytes_up
+
+    return embed_fn
+
+
 def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
-                   seed: int = 1337, **score_kwargs):
+                   seed: int = 1337, split_learning: bool = False,
+                   **score_kwargs):
     """§8.1 rung 6 — the proposed model: federated GRU + server GNN + decision layer.
 
     §11 flags `spatial_agreement()` from compressed embeddings as untested;
@@ -613,7 +672,7 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
     0.149, bias 0.261). Whatever the gap turns out to be *is* the result.
     """
     from src.federated.client import FederatedClient
-    from src.federated.server import run_federated_training
+    from src.federated.server import run_federated_training, run_split_learning
     from src.models.server_gnn import (
         NeighbourReconstructor, build_adjacency, spatial_disagreement,
         train_reconstructor,
@@ -623,6 +682,9 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
     common, per_station_idx = align_features(stations)
     target = stations[0].target
     horizon = stations[0].splits["train"].horizon
+    gcfg = model_cfg["server_gnn"]
+    sl_cfg = fed_cfg.get("split_learning", {})
+    emb_size = int(gcfg["hidden_size"]) if split_learning else 0
 
     client_cfg = dict(model_cfg["node_gru"])
     client_cfg["train"] = dict(client_cfg.get("train", {}))
@@ -632,37 +694,56 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
             station=st, feature_index=per_station_idx[st.station_id],
             n_features=len(common), target_index=common.index(target),
             horizon=horizon, model_cfg=client_cfg, seed=seed,
+            embedding_size=emb_size,
         )
         for st in stations
     ]
 
-    # --- the federated forecaster, identical to rung 5 ----------------------
-    global_weights, fed_history = run_federated_training(
-        clients,
-        rounds=int(fed_cfg.get("rounds", 60)),
-        local_epochs=int(fed_cfg.get("local_epochs", 2)),
-        scheme=fed_cfg.get("aggregation", {}).get("scheme", "region_first"),
-        patience=int(fed_cfg.get("early_stopping_patience", 8)),
-    )
+    holder: dict = {}
+    if split_learning:
+        # §7.2's downlink: embeddings go back to the nodes each round.
+        global_weights, fed_history = run_split_learning(
+            clients,
+            embed_fn=_make_embedder(holder, gcfg, [c.station_id for c in clients],
+                                    coordinates(),
+                                    int(sl_cfg.get("gnn_epochs_per_round", 3))),
+            rounds=int(fed_cfg.get("rounds", 60)),
+            local_epochs=int(fed_cfg.get("local_epochs", 2)),
+            scheme=fed_cfg.get("aggregation", {}).get("scheme", "region_first"),
+            patience=int(fed_cfg.get("early_stopping_patience", 8)),
+        )
+    else:
+        # --- the federated forecaster, identical to rung 5 ------------------
+        global_weights, fed_history = run_federated_training(
+            clients,
+            rounds=int(fed_cfg.get("rounds", 60)),
+            local_epochs=int(fed_cfg.get("local_epochs", 2)),
+            scheme=fed_cfg.get("aggregation", {}).get("scheme", "region_first"),
+            patience=int(fed_cfg.get("early_stopping_patience", 8)),
+        )
 
     # --- the server tier: hidden states only (§7.2) -------------------------
     H = {s: _aligned_hidden_states(clients, global_weights, s)
          for s in ("train", "val", "test")}
     station_ids = [c.station_id for c in clients]
-    gcfg = model_cfg["server_gnn"]
 
-    adjacency = build_adjacency(
-        station_ids, coordinates(), mode=gcfg["graph"]["mode"],
-        distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
-        hidden_states=H["train"][0],
-        correlation_threshold=gcfg["graph"]["correlation_threshold"],
-    )
-    reconstructor = NeighbourReconstructor(
-        hidden_size=H["train"][0].shape[2], adjacency=adjacency,
-        embed_size=gcfg["hidden_size"], num_layers=gcfg["num_layers"],
-        dropout=gcfg["dropout"],
-    )
-    gnn_history = train_reconstructor(reconstructor, H["train"][0], H["val"][0])
+    if holder.get("model") is not None:
+        reconstructor = holder["model"]
+        adjacency = holder["adjacency"]
+        gnn_history = train_reconstructor(reconstructor, H["train"][0], H["val"][0])
+    else:
+        adjacency = build_adjacency(
+            station_ids, coordinates(), mode=gcfg["graph"]["mode"],
+            distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
+            hidden_states=H["train"][0],
+            correlation_threshold=gcfg["graph"]["correlation_threshold"],
+        )
+        reconstructor = NeighbourReconstructor(
+            hidden_size=H["train"][0].shape[2], adjacency=adjacency,
+            embed_size=gcfg["hidden_size"], num_layers=gcfg["num_layers"],
+            dropout=gcfg["dropout"],
+        )
+        gnn_history = train_reconstructor(reconstructor, H["train"][0], H["val"][0])
 
     metric = model_cfg["decision_layer"]["spatial_agreement"]["metric"]
     disagreement = {
@@ -768,8 +849,10 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         extras["rung5_history"] = hist
 
     if 6 in rungs:
+        fed_cfg = load_config("federation")
         rec, thr, hist = rung6_proposed(
-            stations, model_cfg, load_config("federation"), seed=seed,
+            stations, model_cfg, fed_cfg, seed=seed,
+            split_learning=bool(fed_cfg.get("split_learning", {}).get("enabled", False)),
             **score_kwargs)
         all_records.append(rec)
         all_thresholds.update(thr)

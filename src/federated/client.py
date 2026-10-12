@@ -92,15 +92,20 @@ class FederatedClient:
 
     def __init__(self, station, feature_index: np.ndarray, n_features: int,
                  target_index: int, horizon: int, model_cfg: dict,
-                 seed: int = 1337):
+                 seed: int = 1337, embedding_size: int = 0):
         self.station = station
         self.station_id = station.station_id
         self.region = station.splits["train"].region
         self._idx = feature_index          # common-feature reordering (§ rung 3)
+        self.embedding_size = embedding_size
+        #: Embeddings the server sent down (§7.2), per split. None until the
+        #: first round has completed a server pass.
+        self.embeddings: dict[str, np.ndarray] = {}
 
         self.trainer = NodeTrainer(
             n_features=n_features, horizon=horizon, cfg=model_cfg,
             target_index=target_index, station_id=self.station_id, seed=seed,
+            embedding_size=embedding_size,
         )
         self.trainer.cfg.verbose_every = 0   # the server logs per round instead
 
@@ -124,7 +129,8 @@ class FederatedClient:
         learned from them.
         """
         self.trainer.set_weights(global_weights)
-        history = self.trainer.fit(self.X("train"), self.y("train"), epochs=epochs)
+        history = self.trainer.fit(self.X("train"), self.y("train"), epochs=epochs,
+                                   E_train=self.embeddings.get("train"))
         loss = history.train_loss[-1] if history.train_loss else float("nan")
 
         return check_upload(Upload(
@@ -139,7 +145,7 @@ class FederatedClient:
                  split: str = "val") -> float:
         """Local loss under the current global model — reported, never uploaded raw."""
         self.trainer.set_weights(global_weights)
-        pred = self.trainer.predict(self.X(split))
+        pred = self.trainer.predict(self.X(split), E=self.embeddings.get(split))
         y = self.y(split)
         if len(pred) == 0:
             return float("nan")
@@ -148,4 +154,14 @@ class FederatedClient:
     def predict(self, global_weights: dict[str, torch.Tensor],
                 split: str) -> np.ndarray:
         self.trainer.set_weights(global_weights)
-        return self.trainer.predict(self.X(split))
+        return self.trainer.predict(self.X(split), E=self.embeddings.get(split))
+
+    def receive_embeddings(self, split: str, embeddings: np.ndarray) -> None:
+        """Accept the server's spatial summary for this split (§7.2 downlink)."""
+        expected = len(self.station.splits[split])
+        if embeddings.shape[0] != expected:
+            raise ValueError(
+                f"{self.station_id}/{split}: got {embeddings.shape[0]} embeddings "
+                f"for {expected} windows"
+            )
+        self.embeddings[split] = np.ascontiguousarray(embeddings, dtype=np.float32)

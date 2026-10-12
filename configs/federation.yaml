@@ -55,3 +55,8 @@ communication:
   # Reported in §8.2 "communication cost per round (MB)".
   measure_payload_bytes: true
   compress_weights: false    # keep the honest, uncompressed number as baseline
+split_learning:
+  enabled: true
+  # Epochs of server-GNN refresh per federated round. Warm-started, so a few
+  # suffice; the model persists across rounds.
+  gnn_epochs_per_round: 3

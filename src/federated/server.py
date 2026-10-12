@@ -99,6 +99,92 @@ class FederatedServer:
         return per_client * n_clients
 
 
+def run_split_learning(
+    clients: list[FederatedClient],
+    embed_fn,
+    rounds: int = 60,
+    local_epochs: int = 2,
+    scheme: str = "region_first",
+    patience: int = 8,
+) -> tuple[dict[str, torch.Tensor], FederatedHistory]:
+    """§7.3 in full: weights up, hidden states up, embeddings **back down**.
+
+    The loop rung 5 leaves out. After aggregating weights the server runs its
+    graph network over the uploaded hidden states and sends each station a
+    spatial summary, which the node fuses into its encoder state before
+    decoding. Nodes therefore forecast with neighbourhood context they never
+    saw raw.
+
+    ``embed_fn(clients, global_weights)`` does the server-side work and returns
+    ``{split: {station_id: embeddings}}`` plus the uplink bytes those hidden
+    states cost. It is injected rather than imported so this loop stays
+    agnostic about which spatial model is in use.
+
+    **Simplification, stated rather than buried:** gradients do not cross the
+    server boundary. CNFGNN (Meng et al. 2021) backpropagates through the
+    server GNN into the node encoders; here the GNN is trained on its own
+    objective and the embedding is treated as a fixed input by the node. That
+    is weaker, and it is the honest description of what this implements.
+    """
+    if not clients:
+        raise ValueError("no clients")
+
+    server = FederatedServer(clients[0].trainer.get_weights(), scheme=scheme)
+    best_weights = {k: v.clone() for k, v in server.global_weights.items()}
+    stale = 0
+
+    log.info("split learning: %d clients, <=%d rounds x %d local epochs",
+             len(clients), rounds, local_epochs)
+
+    for rnd in range(rounds):
+        uploads = [c.local_train(server.global_weights, local_epochs)
+                   for c in clients]
+        uplink = sum(u.payload_bytes() for u in uploads)
+        downlink = server.broadcast_bytes(len(clients))
+        server.aggregate(uploads)
+
+        # The server pass: hidden states up, embeddings down.
+        embeddings, hidden_bytes = embed_fn(clients, server.global_weights)
+        for split, per_station in embeddings.items():
+            for client in clients:
+                if client.station_id in per_station:
+                    client.receive_embeddings(split, per_station[client.station_id])
+        uplink += hidden_bytes
+        downlink += sum(e.nbytes for per in embeddings.values() for e in per.values())
+
+        val = float(np.nanmean([c.evaluate(server.global_weights, "val")
+                                for c in clients]))
+        train = float(np.nanmean([u.local_train_loss for u in uploads]))
+
+        server.history.rounds.append(RoundRecord(
+            round=rnd, mean_local_train_loss=train, mean_val_loss=val,
+            uplink_bytes=uplink, downlink_bytes=downlink))
+
+        if val < server.history.best_val - 1e-6:
+            server.history.best_val = val
+            server.history.best_round = rnd
+            best_weights = {k: v.detach().clone()
+                            for k, v in server.global_weights.items()}
+            stale = 0
+        else:
+            stale += 1
+
+        log.info("round %3d | train %.5f | val %.5f | %.2f MB | best@%d",
+                 rnd, train, val, server.history.rounds[-1].total_mb,
+                 server.history.best_round)
+
+        if stale >= patience:
+            server.history.stopped_early = True
+            log.info("early stop at round %d (best %d, val %.5f)", rnd,
+                     server.history.best_round, server.history.best_val)
+            break
+
+    h = server.history
+    log.info("split learning done: %d rounds, converged at %d, %.1f MB total",
+             len(h.rounds), h.best_round, sum(r.total_mb for r in h.rounds))
+    return best_weights, h
+
+
 def run_federated_training(
     clients: list[FederatedClient],
     rounds: int = 60,

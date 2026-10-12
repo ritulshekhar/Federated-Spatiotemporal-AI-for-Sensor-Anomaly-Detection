@@ -34,12 +34,28 @@ class GRUEncoderDecoder(nn.Module):
     """Encoder GRU over the input window; decoder GRU rolls out the horizon."""
 
     def __init__(self, n_features: int, hidden_size: int = 64, num_layers: int = 1,
-                 horizon: int = 6, dropout: float = 0.1):
+                 horizon: int = 6, dropout: float = 0.1,
+                 embedding_size: int = 0):
         super().__init__()
         self.n_features = n_features
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.horizon = horizon
+        self.embedding_size = embedding_size
+
+        # §7.2: "Embeddings sent back down to each station." When split
+        # learning is on, the server's spatial summary is fused into the
+        # encoder state before decoding, so neighbourhood context shapes the
+        # forecast. The fusion is initialised to a no-op (see below) so a node
+        # starts from its purely local behaviour and has to *earn* any use of
+        # the embedding.
+        self.fuse = (nn.Linear(hidden_size + embedding_size, hidden_size)
+                     if embedding_size else None)
+        if self.fuse is not None:
+            with torch.no_grad():
+                self.fuse.weight.zero_()
+                self.fuse.weight[:, :hidden_size] = torch.eye(hidden_size)
+                self.fuse.bias.zero_()
 
         self.encoder = nn.GRU(
             input_size=n_features, hidden_size=hidden_size, num_layers=num_layers,
@@ -66,9 +82,14 @@ class GRUEncoderDecoder(nn.Module):
 
     # -- forecasting -------------------------------------------------------
     def forward(self, x: torch.Tensor, y_teacher: torch.Tensor | None = None,
-                teacher_forcing: float = 0.0) -> torch.Tensor:
+                teacher_forcing: float = 0.0,
+                embedding: torch.Tensor | None = None) -> torch.Tensor:
         """``x`` is ``(batch, input_hours, n_features)``; returns ``(batch, horizon)``."""
         enc_out, h = self.encoder(x)
+
+        if self.fuse is not None and embedding is not None:
+            fused = torch.tanh(self.fuse(torch.cat([h[-1], embedding], dim=-1)))
+            h = fused.unsqueeze(0).repeat(self.num_layers, 1, 1).contiguous()
 
         # Decoding starts from the last observed target. The target is feature
         # column 0 by the convention that build_features puts the target
@@ -122,7 +143,8 @@ class NodeTrainer:
     """Local training for one station. Also the unit of a FedAvg round (§7.3)."""
 
     def __init__(self, n_features: int, horizon: int, cfg: dict,
-                 target_index: int = 0, station_id: str = "?", seed: int = 1337):
+                 target_index: int = 0, station_id: str = "?", seed: int = 1337,
+                 embedding_size: int = 0):
         torch.manual_seed(seed)
         self.station_id = station_id
         self.model = GRUEncoderDecoder(
@@ -131,6 +153,7 @@ class NodeTrainer:
             num_layers=cfg.get("num_layers", 1),
             horizon=horizon,
             dropout=cfg.get("dropout", 0.1),
+            embedding_size=embedding_size,
         )
         self.model.target_index = target_index
         tcfg = cfg.get("train", {})
@@ -143,9 +166,11 @@ class NodeTrainer:
     # -- training ----------------------------------------------------------
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
             X_val: np.ndarray | None = None, y_val: np.ndarray | None = None,
-            epochs: int | None = None) -> TrainHistory:
+            epochs: int | None = None,
+            E_train: np.ndarray | None = None,
+            E_val: np.ndarray | None = None) -> TrainHistory:
         epochs = epochs if epochs is not None else self.cfg.epochs
-        loader = self._loader(X_train, y_train, shuffle=True)
+        loader = self._loader(X_train, y_train, shuffle=True, E=E_train)
         # Shuffling WINDOWS during SGD is not the §6.6 violation — the split was
         # already made chronologically, so no future window is in this batch's
         # dataset. Only the split may never be shuffled.
@@ -162,10 +187,12 @@ class NodeTrainer:
             tf = self._teacher_forcing(epoch, epochs)
             self.model.train()
             total, n_batches = 0.0, 0
-            for xb, yb in loader:
-                xb, yb = xb.to(self.device), yb.to(self.device)
+            for batch in loader:
+                xb, yb = batch[0].to(self.device), batch[1].to(self.device)
+                eb = batch[2].to(self.device) if len(batch) > 2 else None
                 opt.zero_grad()
-                pred = self.model(xb, y_teacher=yb, teacher_forcing=tf)
+                pred = self.model(xb, y_teacher=yb, teacher_forcing=tf,
+                                  embedding=eb)
                 loss = loss_fn(pred, yb)
                 loss.backward()
                 if self.cfg.grad_clip:
@@ -177,7 +204,7 @@ class NodeTrainer:
             self.history.train_loss.append(train_loss)
 
             if X_val is not None and len(X_val):
-                val_loss = self._evaluate(X_val, y_val, loss_fn)
+                val_loss = self._evaluate(X_val, y_val, loss_fn, E_val)
                 self.history.val_loss.append(val_loss)
                 sched.step(val_loss)
                 if val_loss < self.history.best_val - 1e-6:
@@ -209,24 +236,29 @@ class NodeTrainer:
         a, b = self.cfg.teacher_forcing_start, self.cfg.teacher_forcing_end
         return a + (b - a) * (epoch / max(epochs - 1, 1))
 
-    def _evaluate(self, X: np.ndarray, y: np.ndarray, loss_fn) -> float:
+    def _evaluate(self, X: np.ndarray, y: np.ndarray, loss_fn,
+                  E: np.ndarray | None = None) -> float:
         self.model.eval()
         total, n = 0.0, 0
         with torch.no_grad():
-            for xb, yb in self._loader(X, y, shuffle=False):
-                xb, yb = xb.to(self.device), yb.to(self.device)
-                total += float(loss_fn(self.model(xb), yb).item()) * len(xb)
+            for batch in self._loader(X, y, shuffle=False, E=E):
+                xb, yb, eb = batch[0].to(self.device), batch[1].to(self.device), None
+                if E is not None:
+                    eb = batch[2].to(self.device)
+                total += float(loss_fn(self.model(xb, embedding=eb), yb).item()) * len(xb)
                 n += len(xb)
         return total / max(n, 1)
 
     # -- inference ---------------------------------------------------------
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def predict(self, X: np.ndarray, E: np.ndarray | None = None) -> np.ndarray:
         """Normalized-space forecasts, ``(n, horizon)``."""
         self.model.eval()
         out = []
         with torch.no_grad():
-            for (xb,) in self._loader(X, None, shuffle=False):
-                out.append(self.model(xb.to(self.device)).cpu().numpy())
+            for batch in self._loader(X, None, shuffle=False, E=E):
+                eb = batch[1].to(self.device) if E is not None else None
+                out.append(self.model(batch[0].to(self.device),
+                                      embedding=eb).cpu().numpy())
         return (np.concatenate(out, axis=0) if out
                 else np.empty((0, self.model.horizon), dtype=np.float32))
 
@@ -235,8 +267,8 @@ class NodeTrainer:
         self.model.eval()
         out = []
         with torch.no_grad():
-            for (xb,) in self._loader(X, None, shuffle=False):
-                out.append(self.model.encode(xb.to(self.device)).cpu().numpy())
+            for batch in self._loader(X, None, shuffle=False):
+                out.append(self.model.encode(batch[0].to(self.device)).cpu().numpy())
         return (np.concatenate(out, axis=0) if out
                 else np.empty((0, self.model.hidden_size), dtype=np.float32))
 
@@ -255,13 +287,15 @@ class NodeTrainer:
         return sum(v.numel() * v.element_size() for v in self.get_weights().values())
 
     # -- helpers -----------------------------------------------------------
-    def _loader(self, X: np.ndarray, y: np.ndarray | None, shuffle: bool):
-        xt = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32))
-        if y is None:
-            ds = torch.utils.data.TensorDataset(xt)
-        else:
-            yt = torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32))
-            ds = torch.utils.data.TensorDataset(xt, yt)
+    def _loader(self, X: np.ndarray, y: np.ndarray | None, shuffle: bool,
+                E: np.ndarray | None = None):
+        """Batches of (x,), (x, y), (x, e) or (x, y, e) — embedding last if present."""
+        tensors = [torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32))]
+        if y is not None:
+            tensors.append(torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32)))
+        if E is not None:
+            tensors.append(torch.from_numpy(np.ascontiguousarray(E, dtype=np.float32)))
         return torch.utils.data.DataLoader(
-            ds, batch_size=self.cfg.batch_size, shuffle=shuffle, drop_last=False,
+            torch.utils.data.TensorDataset(*tensors),
+            batch_size=self.cfg.batch_size, shuffle=shuffle, drop_last=False,
         )
