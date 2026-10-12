@@ -105,10 +105,44 @@ rung 5's 0.344 / 0.341), and **no rung with full raw access — including the
 centralised ST-GNN — detects stuck-at or bias at all.** Only rung 6 does, and
 under the privacy constraint.
 
-**The honest caveat:** at the tight operating point drift and bias sit at
-0.000. They are reachable (drift 0.257, bias 0.747) only at a precision of
-0.049. The trade-off curve, not a single number, is the finding — see
-`CONTEXT.md` entries 11 and 12.
+### How to read the detector's accuracy
+
+**Do not use accuracy.** At a 2.8% fault rate, a classifier that answers "never
+faulty" scores 0.977 — higher than this system's 0.976. That is why §8.2
+specifies precision/recall/F1/AUC-PR.
+
+The two numbers that actually describe it:
+
+**Detection rate by fault size** (h=1, alert tier):
+
+| magnitude | recall |
+|---|---|
+| >5σ | **0.924** |
+| 2–5σ | 0.583 |
+| 1–2σ | 0.130 |
+| <1σ | ~0.135 |
+
+92% of serious faults are caught. Detection collapses below 2σ — which is
+where injected bias and drift live by construction, so their low recall is
+largely a statement about their size.
+
+**Two operating points**, because one threshold cannot serve both jobs:
+
+| | ALERT | REVIEW |
+|---|---|---|
+| purpose | wake someone up | monthly technician list |
+| h=1 F1 | **0.390** | 0.118 |
+| precision | 0.480 | 0.066 |
+| faults >5σ | 0.924 | **1.000** |
+| faults 2–5σ | 0.583 | **0.923** |
+| bias | 0.006 | **0.494** |
+| drift | 0.000 | **0.132** |
+
+The review tier trades precision for coverage, which is correct when an
+inspection is cheap and the alternative is months of quietly wrong data. Run
+either with `python -m src.evaluation.operating_points outputs/<run>`.
+
+See `CONTEXT.md` entries 11–14.
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 

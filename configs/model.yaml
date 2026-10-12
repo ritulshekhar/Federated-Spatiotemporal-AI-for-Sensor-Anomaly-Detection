@@ -120,5 +120,17 @@ decision_layer:
   detector_budget:
     on: overall               # overall | extremes
     target_fpr_overall: 0.005
+
+  # Two operating points, because one threshold cannot serve both jobs.
+  # Spike/noise/dropout are incidents — a false alarm is expensive, so the
+  # alert tier is tight. Drift/bias/stuck-at are calibration problems — a false
+  # alarm costs one cheap inspection while a miss costs months of quietly wrong
+  # data, so the review tier is deliberately loose. Collapsing both into one F1
+  # is what made rung 6 look worse than it is (CONTEXT.md entries 10-11).
+  operating_points:
+    alert:
+      target_fpr_overall: 0.005
+    review:
+      target_fpr_overall: 0.20
   # LOCKED (§7.4): never one global threshold silently inherited across regions.
   per_region_calibration: true

@@ -1397,3 +1397,88 @@ trains on its own reconstruction objective and the node treats the embedding
 as a fixed input. A gradient-coupled version might extract more from the same
 traffic — that is untested, and it is the most promising thing left in the
 architecture.
+
+---
+
+## [2026-10-12] entry 14 — magnitude stratification and two operating points
+
+Two changes to how results are *reported*, not to the detector. Both were
+cheap, and both change what the numbers mean.
+
+### 1. Detection rate by fault magnitude
+
+Magnitude is recovered exactly rather than estimated: the clean and injected
+processed builds differ only by the injection, so `|y_injected - y_clean|` is
+the amount the fault actually moved the reading, expressed in units of that
+station's own training sigma.
+
+h=1, rung 6 + split learning, alert tier:
+
+| magnitude | faults | recall |
+|---|---|---|
+| >5σ | 223 | **0.924** |
+| 2–5σ | 271 | 0.583 |
+| 1–2σ | 478 | 0.130 |
+| 0.5–1σ | 307 | 0.134 |
+| <0.5σ | 452 | 0.139 |
+
+**92% of large faults are caught.** That is the number comparable to published
+work, which generally injects large obvious faults; an aggregate F1 of 0.37
+had been hiding it. Detection collapses below 2σ, which is exactly where entry
+7 measured the normal spread to live.
+
+**And bias and drift are small by construction.** Bias is injected at 0.5–2σ
+and drift ramps to 0.8–2.5σ over 72+ hours, so their per-reading deviation
+almost never leaves the bottom bands. Their 0.000 recall is therefore less a
+detector failure than a consequence of their size — which reframes entry 7's
+conclusion: they are invisible *per reading* because they are small per
+reading, so detection has to come from persistence or from space, never from
+magnitude.
+
+One pleasing anomaly in the table: the <0.5σ band scores 0.139, *higher* than
+1–2σ at 0.130. That is the low-variance detector catching stuck-at faults,
+whose magnitude is near zero because a frozen sensor barely moves the value.
+The ensemble is genuinely not magnitude-driven.
+
+### 2. Two operating points instead of one
+
+| | ALERT (0.005) | REVIEW (0.20) |
+|---|---|---|
+| h=1 recall | 0.315 | **0.575** |
+| h=1 precision | **0.480** | 0.066 |
+| h=1 F1 | **0.390** | 0.118 |
+| fpr_on_extremes | **0.091** | 0.610 |
+
+Recall by magnitude and subtype at each:
+
+| | alert | review |
+|---|---|---|
+| >5σ | 0.924 | **1.000** |
+| 2–5σ | 0.583 | **0.923** |
+| 1–2σ | 0.130 | **0.642** |
+| spike | 0.662 | 0.946 |
+| noise | 0.546 | 0.930 |
+| bias | 0.006 | **0.494** |
+| dropout | 0.120 | 0.450 |
+| stuck-at | 0.136 | 0.267 |
+| drift | 0.000 | **0.132** |
+
+The alert tier answers "wake someone up": F1 0.390, better than rung 5's
+0.314, with 92% of serious faults caught and false alarms on genuine episodes
+at 9%.
+
+The review tier answers "what should a technician check this month": **every**
+fault above 5σ, 92% above 2σ, and — for the first time at a usable rate —
+bias at 0.494 and drift at 0.132. It costs a precision of 0.066, roughly
+fourteen inspections per real fault, which is the right trade when an
+inspection is cheap and the alternative is months of quietly wrong data.
+
+Neither tier is the "real" answer. Reporting one number forced a choice
+between them and made the system look worse than it is.
+
+### Mechanics
+
+Both tiers are computed offline from the `det_*` columns in
+`records.parquet`, so changing either costs seconds. 8 new tests (79 total),
+including that a looser budget can never flag less, and that altering test
+rows cannot move a threshold.
