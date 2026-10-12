@@ -73,7 +73,7 @@ eea:
 # widens every subtype interval past zero, so nothing generalises. More nodes
 # is the only fix.
 station_selection:
-  mode: registry            # explicit | registry
+  mode: explicit            # explicit | registry
   registry:
     provinces: ["08", "17", "25", "43"]
     require_pollutant: NO2

@@ -1,0 +1,461 @@
+<title>FedAirGuard Results</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an instrument console — a summary strip, the sensor network, then results read top-down */
+:root{
+  --bg:#f5f8f8; --surface:#ffffff; --surface-2:#eef3f3; --line:#d4dedd;
+  --fg:#10201f; --muted:#5a6d6c;
+  --accent:#0c6d6d; --accent-soft:#d5eceb;
+  --good:#1d7a4c; --warn:#8f6100; --bad:#a32e2e;
+  --grid:#e3eaea;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0c1312; --surface:#131d1c; --surface-2:#182322; --line:#283635;
+    --fg:#e3ecea; --muted:#90a4a2;
+    --accent:#49cfc3; --accent-soft:#17302f;
+    --good:#4ec38a; --warn:#d7a541; --bad:#e2756e;
+    --grid:#223130;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0c1312; --surface:#131d1c; --surface-2:#182322; --line:#283635;
+  --fg:#e3ecea; --muted:#90a4a2;
+  --accent:#49cfc3; --accent-soft:#17302f;
+  --good:#4ec38a; --warn:#d7a541; --bad:#e2756e;
+  --grid:#223130;
+  color-scheme:dark;
+}
+
+body{background:var(--bg);color:var(--fg);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1060px;margin:0 auto;padding-inline:20px;padding-block:40px 64px}
+h1,h2,h3{font-family:Archivo,"IBM Plex Sans",system-ui,sans-serif;text-wrap:balance;margin:0}
+h1{font-size:clamp(28px,4.4vw,42px);font-weight:700;letter-spacing:-.02em;line-height:1.08}
+h2{font-size:19px;font-weight:700;letter-spacing:-.01em}
+h3{font-size:15px;font-weight:600;margin-bottom:10px}
+p{margin:0}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-variant-numeric:tabular-nums}
+
+header{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:34px}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+.lede{color:var(--muted);max-width:62ch;margin-top:12px;font-size:15.5px}
+.facts{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+.fact{background:var(--surface);border:1px solid var(--line);border-radius:3px;
+  padding:7px 11px;font-size:12.5px;display:flex;gap:7px;align-items:baseline}
+.fact b{font-family:"IBM Plex Mono",monospace;font-weight:500;font-variant-numeric:tabular-nums}
+.fact span{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+
+section{margin-top:44px}
+.shead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.snote{color:var(--muted);font-size:13.5px;max-width:70ch;margin-bottom:18px}
+
+.findings{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:12px}
+.finding{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--muted);
+  border-radius:3px;padding:14px 16px;display:flex;flex-direction:column;gap:7px;min-width:0}
+.finding.good{border-left-color:var(--good)}
+.finding.warn{border-left-color:var(--warn)}
+.finding.bad{border-left-color:var(--bad)}
+.finding p{font-size:13.5px;color:var(--muted)}
+.finding .cav{font-size:12px;color:var(--muted);border-top:1px dotted var(--line);
+  padding-top:7px;margin-top:auto;font-style:italic}
+
+.decision{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.dcell{background:var(--surface);border:1px solid var(--line);border-radius:3px;padding:13px 15px}
+.dcell .tag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;
+  letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.good{background:var(--good)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.dcell p{font-size:13px;color:var(--muted)}
+
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:3px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:9px 13px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+thead th{background:var(--surface-2);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tbody tr.best td{background:var(--accent-soft)}
+td.num{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+caption{caption-side:bottom;text-align:left;padding:9px 13px;font-size:12px;color:var(--muted)}
+
+.chartcard{background:var(--surface);border:1px solid var(--line);border-radius:3px;
+  padding:16px;min-width:0}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}
+svg{display:block;max-width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px;font-size:12px;color:var(--muted)}
+.legend i{width:11px;height:11px;border-radius:2px;display:inline-block;margin-right:5px;
+  vertical-align:-1px;background:var(--muted)}
+.legend i.s0{background:var(--muted);opacity:.55}
+.legend i.s1{background:var(--accent)}
+.legend i.s2{background:var(--good)}
+.legend i.s-review{background:var(--warn);opacity:.85}
+.legend i.k-urban_traffic{background:var(--bad)}
+.legend i.k-urban_background{background:var(--accent)}
+.legend i.k-suburban_background{background:var(--warn)}
+.legend i.k-other{background:var(--muted)}
+.legend i.outline{background:transparent;border:1.6px solid var(--muted)}
+
+/* Chart colours come from the cascade, not from script, so they follow the theme */
+svg .grid{stroke:var(--grid);stroke-width:1;fill:none}
+svg .axis{fill:var(--muted);font-size:10px;font-family:"IBM Plex Mono",monospace}
+svg .lbl{fill:var(--fg);font-size:12px;font-family:"IBM Plex Sans",sans-serif}
+svg .val{fill:var(--muted);font-size:10.5px;font-family:"IBM Plex Mono",monospace}
+svg .stid{fill:var(--fg);font-size:10.5px;font-family:"IBM Plex Mono",monospace}
+svg .s0{fill:var(--muted);opacity:.55}
+svg .s1{fill:var(--accent)}
+svg .s2{fill:var(--good)}
+svg .s-alert{fill:var(--accent)}
+svg .s-review{fill:var(--warn);opacity:.85}
+svg .zero{stroke:var(--fg);opacity:.45;stroke-dasharray:3 3;fill:none}
+svg .ci{stroke:var(--muted);opacity:.6;stroke-width:2.5;stroke-linecap:round;fill:none}
+svg .citick{stroke:var(--muted);opacity:.6;stroke-width:2;fill:none}
+svg .pt{fill:var(--accent)}
+svg .pt.sig{fill:var(--good)}
+svg .node{opacity:.92}
+svg .node.k-urban_traffic{fill:var(--bad)}
+svg .node.k-urban_background{fill:var(--accent)}
+svg .node.k-suburban_background{fill:var(--warn)}
+svg .node.k-other{fill:var(--muted)}
+svg .node.off{fill:none;stroke-width:1.6;opacity:.8}
+svg .node.off.k-urban_traffic{stroke:var(--bad)}
+svg .node.off.k-urban_background{stroke:var(--accent)}
+svg .node.off.k-suburban_background{stroke:var(--warn)}
+svg .node.off.k-other{stroke:var(--muted)}
+
+footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
+  font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:9px}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">Federated spatiotemporal AI · Catalonia</div>
+  <h1>Catching broken air-quality sensors without sharing their data</h1>
+  <p class="lede">Seven Barcelona monitoring stations each train a forecasting model on their own
+    readings. Only model weights and a compressed summary of recent conditions ever leave a
+    station. A server compares those summaries across stations to decide whether an unusual
+    reading is real pollution or a failing instrument.</p>
+  <div class="facts" id="facts"></div>
+</header>
+
+<section>
+  <div class="shead"><h2>The decision, per reading</h2></div>
+  <p class="snote">Every forecast is compared against what the sensor actually reported. When the
+    gap is large enough to matter, the neighbouring stations arbitrate.</p>
+  <div class="decision">
+    <div class="dcell">
+      <span class="tag"><i class="dot good"></i>Trustworthy</span>
+      <p>The reading sits close to the forecast. Nothing to flag.</p>
+    </div>
+    <div class="dcell">
+      <span class="tag"><i class="dot warn"></i>Real event</span>
+      <p>The reading is unusual, and nearby stations are seeing it too. A genuine pollution
+         episode, not a fault.</p>
+    </div>
+    <div class="dcell">
+      <span class="tag"><i class="dot bad"></i>Sensor fault</span>
+      <p>The reading is unusual and no neighbour agrees. The instrument is the odd one out.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><h2>What the measurements show</h2></div>
+  <div class="findings" id="findings"></div>
+</section>
+
+<section>
+  <div class="shead"><h2>The sensor network</h2></div>
+  <p class="snote">Ten stations were selected; three report no NO<sub>2</sub> and sit outside the
+    node set. Position is real latitude and longitude from the EEA station registry.</p>
+  <div class="chartcard"><div id="map"></div><div class="legend" id="maplegend"></div></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Forecast error</h2></div>
+  <p class="snote">Root-mean-square error in µg/m³ of NO<sub>2</sub>, median across stations, on
+    clean data. Typical NO<sub>2</sub> at these stations is 30.6 µg/m³. Persistence simply repeats
+    the last reading.</p>
+  <div class="chartcard"><div id="fcchart"></div><div class="legend" id="fclegend"></div></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Every model, side by side</h2></div>
+  <p class="snote">The ladder runs from a trivial baseline to the proposed federated model. Rung 4
+    has no privacy constraint at all and exists to price the constraint: the gap between it and the
+    federated rungs is what privacy costs.</p>
+  <div class="tablewrap"><table id="ladder"></table></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Which faults get caught</h2></div>
+  <p class="snote">Six fault types are injected at the rate and episode lengths measured in the real
+    data. Only the corrupted value itself is synthetic. Stuck-at is the telling case: no model that
+    looks only at a station's own history finds it, because a frozen sensor is easier to predict
+    than a working one.</p>
+  <div class="chartcard"><div id="subchart"></div><div class="legend" id="sublegend"></div></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Two operating points</h2></div>
+  <p class="snote">One threshold cannot serve both jobs. Spikes and dropouts are incidents worth an
+    alert; drift and bias are calibration problems that belong on a maintenance list, where a cheap
+    inspection beats months of quietly wrong data.</p>
+  <div class="two">
+    <div class="chartcard"><h3>By fault size</h3><div id="magchart"></div></div>
+    <div class="chartcard"><h3>By fault type</h3><div id="opchart"></div></div>
+  </div>
+  <div class="legend" id="oplegend"></div>
+</section>
+
+<section>
+  <div class="shead"><h2>How much of this is certain</h2></div>
+  <p class="snote">Paired block bootstrap, proposed model minus federated baseline at a 3-hour
+    horizon. An interval that crosses zero means the data does not establish a difference. With
+    seven stations, none of the aggregate differences do.</p>
+  <div class="chartcard"><div id="cichart"></div></div>
+</section>
+
+<footer>
+  <div><b>Data.</b> European Environment Agency E1a verified air quality, Catalonia, 2017–2024.
+    Meteorology from ERA5 reanalysis at each station's coordinates.</div>
+  <div><b>Why synthetic faults.</b> Every reading the EEA flags as invalid has its value replaced
+    by a no-data sentinel, so the real labels mark absent readings rather than wrong ones.
+    Evaluation uses injected faults matched to the measured real rate of 2.805% and to real fault
+    episode durations.</div>
+  <div><b>Caveat.</b> Results come from one test window and seven stations. Differences between
+    models are mostly smaller than their confidence intervals.</div>
+  <div id="stamp" class="mono"></div>
+</footer>
+</div>
+
+<script id="fd" type="application/json">__FEDAIRGUARD_DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('fd').textContent);
+const NS = 'http://www.w3.org/2000/svg';
+const NODE_SET = new Set(['ES0691A','ES1396A','ES1438A','ES1480A','ES1679A','ES1856A','ES1992A']);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const KNOWN_CLASS = new Set(['urban_traffic','urban_background','suburban_background']);
+
+function el(tag, attrs, text){
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  return e;
+}
+function svgRoot(w, h, label){
+  const s = el('svg', {viewBox:`0 0 ${w} ${h}`, width:'100%', height:h, role:'img',
+                       preserveAspectRatio:'xMinYMin meet'});
+  s.setAttribute('aria-label', label);
+  return s;
+}
+
+/* ---------- header ---------- */
+const ds = D.dataset;
+document.getElementById('facts').innerHTML = [
+  ['Stations', ds.stations], ['Hourly readings', ds.rows.toLocaleString('en-GB')],
+  ['Years', ds.years], ['Pollutant', 'NO₂'],
+  ['Real fault rate', (ds.fault_rate*100).toFixed(2) + '%'],
+].map(([k,v]) => `<div class="fact"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+document.getElementById('stamp').textContent = 'Generated ' + D.generated;
+
+/* ---------- findings ---------- */
+document.getElementById('findings').innerHTML = D.findings.map(f => `
+  <article class="finding ${esc(f.tone)}">
+    <h3>${esc(f.title)}</h3>
+    <p>${esc(f.detail)}</p>
+    ${f.caveat ? `<p class="cav">${esc(f.caveat)}</p>` : ''}
+  </article>`).join('');
+
+/* ---------- station map ---------- */
+(function(){
+  const W=860, H=340, pad={l:52,r:18,t:20,b:42};
+  const st = D.stations;
+  if (!st.length) return;
+  const lats = st.map(s=>s.lat), lons = st.map(s=>s.lon);
+  const la0 = Math.min(...lats)-.014, la1 = Math.max(...lats)+.014;
+  const lo0 = Math.min(...lons)-.020, lo1 = Math.max(...lons)+.020;
+  const x = v => pad.l + (v-lo0)/(lo1-lo0) * (W-pad.l-pad.r);
+  const y = v => H-pad.b - (v-la0)/(la1-la0) * (H-pad.t-pad.b);
+  const s = svgRoot(W, H, 'Monitoring stations plotted by latitude and longitude');
+
+  for (let i=0;i<=4;i++){
+    const gy = pad.t + i*(H-pad.t-pad.b)/4;
+    s.appendChild(el('line',{class:'grid',x1:pad.l,x2:W-pad.r,y1:gy,y2:gy}));
+    s.appendChild(el('text',{class:'axis',x:pad.l-9,y:gy+4,'text-anchor':'end'},
+      (la1 - i*(la1-la0)/4).toFixed(2)+'°N'));
+    const gx = pad.l + i*(W-pad.l-pad.r)/4;
+    s.appendChild(el('line',{class:'grid',x1:gx,x2:gx,y1:pad.t,y2:H-pad.b}));
+    s.appendChild(el('text',{class:'axis',x:gx,y:H-pad.b+18,'text-anchor':'middle'},
+      (lo0 + i*(lo1-lo0)/4).toFixed(2)+'°E'));
+  }
+  st.forEach(p => {
+    const inSet = NODE_SET.has(p.id);
+    const k = KNOWN_CLASS.has(p.klass) ? p.klass : 'other';
+    s.appendChild(el('circle',{class:`node k-${k}${inSet?'':' off'}`,
+      cx:x(p.lon), cy:y(p.lat), r:inSet?7:6}));
+    s.appendChild(el('text',{class:'stid',x:x(p.lon),y:y(p.lat)-12,'text-anchor':'middle'}, p.id));
+  });
+  document.getElementById('map').appendChild(s);
+  document.getElementById('maplegend').innerHTML =
+    `<span><i class="k-urban_traffic"></i>Urban traffic</span>
+     <span><i class="k-urban_background"></i>Urban background</span>
+     <span><i class="k-suburban_background"></i>Suburban background</span>
+     <span><i class="k-other"></i>Other</span>
+     <span><i class="outline"></i>No NO₂ — outside the node set</span>`;
+})();
+
+/* ---------- grouped bars ---------- */
+function groupedBars(mountId, rows, series, opts){
+  opts = opts || {};
+  const W = opts.w || 820, barH = opts.barH || 17, gap = 6, groupGap = 16;
+  const pad = {l: opts.left || 150, r: 74, t: 14, b: 28};
+  const H = pad.t + pad.b + rows.length*(series.length*(barH+gap) + groupGap);
+  const max = opts.max || Math.max(...rows.flatMap(r => series.map(s => r.values[s.key] || 0))) || 1;
+  const dp = opts.dp == null ? 2 : opts.dp;
+  const s = svgRoot(W, H, opts.label || 'bar chart');
+  const x = v => pad.l + (v/max)*(W-pad.l-pad.r);
+
+  for (let i=0;i<=4;i++){
+    const gx = pad.l + i*(W-pad.l-pad.r)/4;
+    s.appendChild(el('line',{class:'grid',x1:gx,x2:gx,y1:pad.t,y2:H-pad.b}));
+    s.appendChild(el('text',{class:'axis',x:gx,y:H-pad.b+17,'text-anchor':'middle'},
+      (max*i/4).toFixed(dp)));
+  }
+  let cy = pad.t;
+  rows.forEach(r => {
+    const blockH = series.length*(barH+gap) - gap;
+    s.appendChild(el('text',{class:'lbl',x:pad.l-11,y:cy+blockH/2+4,'text-anchor':'end'}, r.label));
+    series.forEach(se => {
+      const v = r.values[se.key];
+      if (v != null){
+        s.appendChild(el('rect',{class:se.cls, x:pad.l, y:cy,
+          width:Math.max(x(v)-pad.l, 1.5), height:barH, rx:1.5}));
+        s.appendChild(el('text',{class:'val',x:x(v)+7,y:cy+barH-4}, v.toFixed(dp)));
+      }
+      cy += barH + gap;
+    });
+    cy += groupGap - gap;
+  });
+  document.getElementById(mountId).appendChild(s);
+}
+
+/* ---------- forecast error ---------- */
+(function(){
+  const want = {'1_persistence':'Persistence','2_local_gru':'Local GRU',
+                '3_centralised_gru':'Centralised GRU'};
+  const byH = {};
+  (D.forecasting.with_met || D.forecasting.without_met || []).forEach(r => {
+    if (!want[r.model]) return;
+    byH[r.horizon] = byH[r.horizon] || {label:r.horizon+' hour'+(r.horizon>1?'s':'')+' ahead', values:{}};
+    byH[r.horizon].values[r.model] = r.rmse;
+  });
+  const rows = Object.keys(byH).map(Number).sort((a,b)=>a-b).map(k=>byH[k]);
+  if (!rows.length) return;
+  groupedBars('fcchart', rows, [
+    {key:'1_persistence', cls:'s0'},
+    {key:'2_local_gru', cls:'s1'},
+    {key:'3_centralised_gru', cls:'s2'},
+  ], {dp:2, left:136, label:'Forecast error by horizon'});
+  document.getElementById('fclegend').innerHTML =
+    `<span><i class="s0"></i>Persistence</span><span><i class="s1"></i>Local GRU</span>
+     <span><i class="s2"></i>Centralised GRU</span><span>Lower is better · µg/m³</span>`;
+})();
+
+/* ---------- ladder ---------- */
+(function(){
+  const NAMES = {'1_persistence':'1 · Persistence','2_local_gru':'2 · Local GRU',
+    '3_centralised_gru':'3 · Centralised GRU',
+    '4_centralised_stgnn':'4 · Centralised ST-GNN (no privacy)',
+    '5_fedavg_gru':'5 · Federated GRU','6_proposed':'6 · Proposed',
+    '6_proposed_split':'6 · Proposed + embedding feedback'};
+  const byModel = {};
+  D.ladder.forEach(r => { (byModel[r.model] = byModel[r.model] || {})[r.horizon] = r; });
+  const fmt = (v,d) => (v==null || Number.isNaN(v)) ? '—' : Number(v).toFixed(d==null?3:d);
+  const body = Object.keys(NAMES).filter(m=>byModel[m]).map(m => {
+    const r = byModel[m];
+    return `<tr class="${m==='4_centralised_stgnn'?'best':''}"><td>${esc(NAMES[m])}</td>
+      <td class="num">${fmt(r[1]&&r[1].rmse,2)}</td>
+      <td class="num">${fmt(r[3]&&r[3].rmse,2)}</td>
+      <td class="num">${fmt(r[6]&&r[6].rmse,2)}</td>
+      <td class="num">${fmt(r[3]&&r[3].f1)}</td>
+      <td class="num">${fmt(r[3]&&r[3].auc_pr)}</td></tr>`;
+  }).join('');
+  document.getElementById('ladder').innerHTML =
+    `<thead><tr><th>Model</th><th>RMSE 1h</th><th>RMSE 3h</th><th>RMSE 6h</th>
+      <th>F1 3h</th><th>AUC-PR 3h</th></tr></thead><tbody>${body}</tbody>
+     <caption>The shaded row has no privacy constraint and is an upper reference, not a goal.
+      RMSE here is measured on data carrying injected faults, so it runs higher than the
+      clean-data figures above and is comparable only within this table.</caption>`;
+})();
+
+/* ---------- fault subtypes ---------- */
+(function(){
+  const LBL = {spike:'Spike',noise:'Noise',dropout:'Dropout',stuck_at:'Stuck sensor',
+               bias:'Constant offset',drift:'Slow drift'};
+  const base = {}, prop = {};
+  D.subtypes.forEach(r => {
+    const t = r.fault_type;
+    if (r.model === '6_proposed' || r.model === '6_proposed_split')
+      prop[t] = Math.max(prop[t] == null ? 0 : prop[t], r.recall);
+    else base[t] = Math.max(base[t] == null ? 0 : base[t], r.recall);
+  });
+  const rows = Object.keys(LBL).map(k => ({label:LBL[k],
+    values:{base: base[k]||0, prop: prop[k]||0}}));
+  groupedBars('subchart', rows, [{key:'base',cls:'s0'},{key:'prop',cls:'s1'}],
+    {dp:3, max:1, left:136, label:'Share of faults detected, by fault type'});
+  document.getElementById('sublegend').innerHTML =
+    `<span><i class="s0"></i>Best model using only its own history</span>
+     <span><i class="s1"></i>Proposed, using cross-station agreement</span>
+     <span>Share of faults detected · 1 hour ahead</span>`;
+})();
+
+/* ---------- operating points ---------- */
+(function(){
+  const op = D.operating_points;
+  const LBL = {spike:'Spike',noise:'Noise',stuck_at:'Stuck sensor',dropout:'Dropout',
+               bias:'Constant offset',drift:'Slow drift'};
+  const series = [{key:'a',cls:'s-alert'},{key:'b',cls:'s-review'}];
+  groupedBars('magchart',
+    op.by_magnitude.map(r => ({label:r.band, values:{a:r.alert, b:r.review}})),
+    series, {w:430, dp:3, max:1, left:76, barH:14, label:'Recall by fault size'});
+  groupedBars('opchart',
+    op.by_subtype.map(r => ({label:LBL[r.subtype]||r.subtype, values:{a:r.alert, b:r.review}})),
+    series, {w:430, dp:3, max:1, left:112, barH:14, label:'Recall by fault type'});
+  document.getElementById('oplegend').innerHTML =
+    `<span><i class="s1"></i>Alert — high precision, for incidents</span>
+     <span><i class="s-review"></i>Review — high coverage, for the maintenance list</span>
+     <span>σ is the station's own typical variation</span>`;
+})();
+
+/* ---------- confidence intervals ---------- */
+(function(){
+  const rows = D.uncertainty;
+  if (!rows || !rows.length) return;
+  const W=820, rowH=42, pad={l:112,r:34,t:30,b:32};
+  const H = pad.t + pad.b + rows.length*rowH;
+  const lim = Math.max(...rows.flatMap(r => [Math.abs(r.lo), Math.abs(r.hi)])) * 1.5;
+  const x = v => pad.l + (v+lim)/(2*lim)*(W-pad.l-pad.r);
+  const s = svgRoot(W, H, 'Confidence intervals for the difference between two models');
+
+  s.appendChild(el('line',{class:'zero',x1:x(0),x2:x(0),y1:pad.t-10,y2:H-pad.b}));
+  s.appendChild(el('text',{class:'axis',x:x(0),y:pad.t-16,'text-anchor':'middle'},'no difference'));
+  rows.forEach((r,i) => {
+    const cy = pad.t + i*rowH + rowH/2;
+    s.appendChild(el('text',{class:'lbl',x:pad.l-12,y:cy+4,'text-anchor':'end'}, r.metric));
+    s.appendChild(el('line',{class:'ci',x1:x(r.lo),x2:x(r.hi),y1:cy,y2:cy}));
+    [r.lo,r.hi].forEach(v => s.appendChild(
+      el('line',{class:'citick',x1:x(v),x2:x(v),y1:cy-5,y2:cy+5})));
+    s.appendChild(el('circle',{class:'pt'+(r.sig?' sig':''),cx:x(r.diff),cy:cy,r:5}));
+    s.appendChild(el('text',{class:'val',x:x(r.hi)+9,y:cy+4},
+      `${r.diff>=0?'+':''}${r.diff.toFixed(3)}  [${r.lo.toFixed(3)}, ${r.hi.toFixed(3)}]`));
+  });
+  [-lim*0.7, 0, lim*0.7].forEach(v => s.appendChild(
+    el('text',{class:'axis',x:x(v),y:H-pad.b+18,'text-anchor':'middle'}, v.toFixed(2))));
+  document.getElementById('cichart').appendChild(s);
+})();
+</script>

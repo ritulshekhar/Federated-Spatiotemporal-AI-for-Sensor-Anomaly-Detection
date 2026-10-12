@@ -1,0 +1,1250 @@
+{
+  "generated": "2026-10-12 18:15 UTC",
+  "stations": [
+    {
+      "id": "ES1438A",
+      "name": "Barcelona (Gracia - Sant Gervasi)",
+      "klass": "urban_traffic",
+      "lat": 41.385343284,
+      "lon": 2.15382196
+    },
+    {
+      "id": "ES1396A",
+      "name": "Barcelona (Eixample)",
+      "klass": "urban_background",
+      "lat": 41.378802802,
+      "lon": 2.133098078
+    },
+    {
+      "id": "ES1856A",
+      "name": "Barcelona (Sants)",
+      "klass": "urban_background",
+      "lat": 41.4260772,
+      "lon": 2.147992032
+    },
+    {
+      "id": "ES1679A",
+      "name": "Barcelona (Vall d'Hebron)",
+      "klass": "urban_background",
+      "lat": 41.386413934,
+      "lon": 2.187416735
+    },
+    {
+      "id": "ES0691A",
+      "name": "Barcelona (Ciutadella)",
+      "klass": "urban_background",
+      "lat": 41.403881851,
+      "lon": 2.204522594
+    },
+    {
+      "id": "ES1480A",
+      "name": "Barcelona (Poblenou)",
+      "klass": "urban_traffic",
+      "lat": 41.39874325099999,
+      "lon": 2.153385124
+    },
+    {
+      "id": "ES1992A",
+      "name": "Barcelona (Observatori Fabra)",
+      "klass": "urban_background",
+      "lat": 41.38748464,
+      "lon": 2.115149666
+    },
+    {
+      "id": "ES2027A",
+      "name": "Badalona",
+      "klass": "urban_background",
+      "lat": 41.45131069,
+      "lon": 2.248236084
+    },
+    {
+      "id": "ES1362A",
+      "name": "Sant Adria de Besos",
+      "klass": "urban_background",
+      "lat": 41.38322658900001,
+      "lon": 2.044453466
+    },
+    {
+      "id": "ES0559A",
+      "name": "Barcelona (Sants - traffic)",
+      "klass": "urban_traffic",
+      "lat": 41.38742395799999,
+      "lon": 2.164918317
+    }
+  ],
+  "forecasting": {
+    "without_met": [
+      {
+        "model": "1_persistence",
+        "horizon": 1,
+        "rmse": 8.83726817186385,
+        "min": 8.074695309527506,
+        "max": 10.653620389260434
+      },
+      {
+        "model": "1_persistence",
+        "horizon": 3,
+        "rmse": 15.397955981145769,
+        "min": 14.324375663899096,
+        "max": 17.909438825187443
+      },
+      {
+        "model": "1_persistence",
+        "horizon": 6,
+        "rmse": 19.46677866629442,
+        "min": 17.665899838329953,
+        "max": 22.16264563778053
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 1,
+        "rmse": 8.023856846695319,
+        "min": 7.122503774711165,
+        "max": 9.590753956706976
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 3,
+        "rmse": 11.86601883583014,
+        "min": 10.393350402984227,
+        "max": 13.880224239198933
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 6,
+        "rmse": 13.51225352783585,
+        "min": 11.454588162778764,
+        "max": 15.497632749475718
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 1,
+        "rmse": 7.931660186992829,
+        "min": 7.046223986057425,
+        "max": 9.647059946739802
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 3,
+        "rmse": 12.092839442996937,
+        "min": 10.447917457592853,
+        "max": 14.17482927065882
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 6,
+        "rmse": 13.770008291070884,
+        "min": 11.742436872412368,
+        "max": 16.032803915842546
+      }
+    ],
+    "with_met": [
+      {
+        "model": "1_persistence",
+        "horizon": 1,
+        "rmse": 8.83726817186385,
+        "min": 8.074695309527506,
+        "max": 10.653620389260434
+      },
+      {
+        "model": "1_persistence",
+        "horizon": 3,
+        "rmse": 15.397955981145769,
+        "min": 14.324375663899096,
+        "max": 17.909438825187443
+      },
+      {
+        "model": "1_persistence",
+        "horizon": 6,
+        "rmse": 19.46677866629442,
+        "min": 17.665899838329953,
+        "max": 22.16264563778053
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 1,
+        "rmse": 8.067475030086344,
+        "min": 7.167706475130405,
+        "max": 9.370202192070606
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 3,
+        "rmse": 11.70522838382788,
+        "min": 10.181492843459404,
+        "max": 13.297217230577685
+      },
+      {
+        "model": "2_local_gru",
+        "horizon": 6,
+        "rmse": 13.191623502262535,
+        "min": 11.108626778646842,
+        "max": 14.998461540498658
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 1,
+        "rmse": 7.98306089235372,
+        "min": 6.994331409133333,
+        "max": 9.45001846431289
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 3,
+        "rmse": 11.924318463606966,
+        "min": 10.416326057007774,
+        "max": 13.58265330482103
+      },
+      {
+        "model": "3_centralised_gru",
+        "horizon": 6,
+        "rmse": 13.336138767576363,
+        "min": 11.801673993213807,
+        "max": 15.131461408330006
+      }
+    ],
+    "per_station": [
+      {
+        "model": "1_persistence",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 8.485,
+        "mae": 5.709
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 15.372,
+        "mae": 11.061
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 19.406,
+        "mae": 14.599
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 8.107,
+        "mae": 5.263
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 14.719,
+        "mae": 9.975
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 18.4,
+        "mae": 12.952
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 10.654,
+        "mae": 6.902
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 17.909,
+        "mae": 12.624
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 21.368,
+        "mae": 15.812
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 9.479,
+        "mae": 5.958
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 16.252,
+        "mae": 10.916
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 19.801,
+        "mae": 13.81
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 8.075,
+        "mae": 5.089
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 14.324,
+        "mae": 9.443
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 17.666,
+        "mae": 12.04
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 9.929,
+        "mae": 6.869
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 17.59,
+        "mae": 12.855
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 22.163,
+        "mae": 16.915
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 8.837,
+        "mae": 6.016
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 15.398,
+        "mae": 11.015
+      },
+      {
+        "model": "1_persistence",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 19.467,
+        "mae": 14.547
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 7.369,
+        "mae": 5.18
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 11.096,
+        "mae": 8.216
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 12.824,
+        "mae": 9.781
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 7.194,
+        "mae": 4.942
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 10.625,
+        "mae": 7.495
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 11.965,
+        "mae": 8.646
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 9.37,
+        "mae": 6.42
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 13.297,
+        "mae": 9.843
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 14.998,
+        "mae": 11.386
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 8.35,
+        "mae": 5.765
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 11.949,
+        "mae": 8.739
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 13.192,
+        "mae": 10.035
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 7.168,
+        "mae": 4.913
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 10.181,
+        "mae": 7.167
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 11.109,
+        "mae": 7.892
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 8.887,
+        "mae": 6.366
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 12.925,
+        "mae": 9.616
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 14.848,
+        "mae": 11.474
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 8.067,
+        "mae": 5.786
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 11.705,
+        "mae": 8.764
+      },
+      {
+        "model": "2_local_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 13.231,
+        "mae": 10.211
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 7.472,
+        "mae": 5.339
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 11.313,
+        "mae": 8.559
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES0691A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 12.85,
+        "mae": 10.066
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 7.093,
+        "mae": 4.9
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 10.742,
+        "mae": 7.814
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1396A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 12.146,
+        "mae": 9.261
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 9.45,
+        "mae": 6.434
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 13.583,
+        "mae": 9.986
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1679A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 15.074,
+        "mae": 11.511
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 8.268,
+        "mae": 5.463
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 11.924,
+        "mae": 8.45
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1856A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 13.336,
+        "mae": 9.801
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 1,
+        "rmse": 6.994,
+        "mae": 4.713
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 3,
+        "rmse": 10.416,
+        "mae": 7.417
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1992A",
+        "station_class": "urban_background",
+        "horizon": 6,
+        "rmse": 11.802,
+        "mae": 8.798
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 8.788,
+        "mae": 6.401
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 13.146,
+        "mae": 10.08
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1438A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 15.131,
+        "mae": 12.03
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 1,
+        "rmse": 7.983,
+        "mae": 5.756
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 3,
+        "rmse": 11.956,
+        "mae": 9.101
+      },
+      {
+        "model": "3_centralised_gru",
+        "station_id": "ES1480A",
+        "station_class": "urban_traffic",
+        "horizon": 6,
+        "rmse": 13.708,
+        "mae": 10.829
+      }
+    ]
+  },
+  "ladder": [
+    {
+      "model": "1_persistence",
+      "horizon": 1,
+      "rmse": 17.231,
+      "recall": 0.153,
+      "precision": 0.661,
+      "f1": 0.248,
+      "auc_pr": 0.242,
+      "fpr_on_extremes": 0.0
+    },
+    {
+      "model": "1_persistence",
+      "horizon": 3,
+      "rmse": 25.4,
+      "recall": 0.213,
+      "precision": 0.486,
+      "f1": 0.303,
+      "auc_pr": 0.205,
+      "fpr_on_extremes": 0.071
+    },
+    {
+      "model": "1_persistence",
+      "horizon": 6,
+      "rmse": 28.162,
+      "recall": 0.205,
+      "precision": 0.434,
+      "f1": 0.275,
+      "auc_pr": 0.168,
+      "fpr_on_extremes": 0.141
+    },
+    {
+      "model": "2_local_gru",
+      "horizon": 1,
+      "rmse": 15.102,
+      "recall": 0.199,
+      "precision": 0.735,
+      "f1": 0.307,
+      "auc_pr": 0.307,
+      "fpr_on_extremes": 0.02
+    },
+    {
+      "model": "2_local_gru",
+      "horizon": 3,
+      "rmse": 19.029,
+      "recall": 0.234,
+      "precision": 0.652,
+      "f1": 0.351,
+      "auc_pr": 0.339,
+      "fpr_on_extremes": 0.142
+    },
+    {
+      "model": "2_local_gru",
+      "horizon": 6,
+      "rmse": 20.023,
+      "recall": 0.216,
+      "precision": 0.609,
+      "f1": 0.334,
+      "auc_pr": 0.32,
+      "fpr_on_extremes": 0.165
+    },
+    {
+      "model": "3_centralised_gru",
+      "horizon": 1,
+      "rmse": 15.098,
+      "recall": 0.189,
+      "precision": 0.721,
+      "f1": 0.296,
+      "auc_pr": 0.302,
+      "fpr_on_extremes": 0.025
+    },
+    {
+      "model": "3_centralised_gru",
+      "horizon": 3,
+      "rmse": 19.302,
+      "recall": 0.225,
+      "precision": 0.636,
+      "f1": 0.334,
+      "auc_pr": 0.342,
+      "fpr_on_extremes": 0.165
+    },
+    {
+      "model": "3_centralised_gru",
+      "horizon": 6,
+      "rmse": 20.849,
+      "recall": 0.216,
+      "precision": 0.691,
+      "f1": 0.333,
+      "auc_pr": 0.341,
+      "fpr_on_extremes": 0.203
+    },
+    {
+      "model": "5_fedavg_gru",
+      "horizon": 1,
+      "rmse": 15.1,
+      "recall": 0.202,
+      "precision": 0.722,
+      "f1": 0.314,
+      "auc_pr": 0.311,
+      "fpr_on_extremes": 0.024
+    },
+    {
+      "model": "5_fedavg_gru",
+      "horizon": 3,
+      "rmse": 19.378,
+      "recall": 0.234,
+      "precision": 0.682,
+      "f1": 0.344,
+      "auc_pr": 0.346,
+      "fpr_on_extremes": 0.157
+    },
+    {
+      "model": "5_fedavg_gru",
+      "horizon": 6,
+      "rmse": 20.689,
+      "recall": 0.215,
+      "precision": 0.692,
+      "f1": 0.341,
+      "auc_pr": 0.339,
+      "fpr_on_extremes": 0.188
+    },
+    {
+      "model": "4_centralised_stgnn",
+      "horizon": 1,
+      "rmse": 14.618,
+      "recall": 0.204,
+      "precision": 0.741,
+      "f1": 0.322,
+      "auc_pr": 0.343,
+      "fpr_on_extremes": 0.02
+    },
+    {
+      "model": "4_centralised_stgnn",
+      "horizon": 3,
+      "rmse": 18.097,
+      "recall": 0.245,
+      "precision": 0.64,
+      "f1": 0.357,
+      "auc_pr": 0.334,
+      "fpr_on_extremes": 0.17
+    },
+    {
+      "model": "4_centralised_stgnn",
+      "horizon": 6,
+      "rmse": 19.207,
+      "recall": 0.225,
+      "precision": 0.63,
+      "f1": 0.333,
+      "auc_pr": 0.343,
+      "fpr_on_extremes": 0.212
+    },
+    {
+      "model": "6_proposed",
+      "horizon": 1,
+      "rmse": 15.1,
+      "recall": 0.197,
+      "precision": 0.488,
+      "f1": 0.299,
+      "auc_pr": 0.255,
+      "fpr_on_extremes": 0.0
+    },
+    {
+      "model": "6_proposed",
+      "horizon": 3,
+      "rmse": 19.378,
+      "recall": 0.276,
+      "precision": 0.527,
+      "f1": 0.385,
+      "auc_pr": 0.384,
+      "fpr_on_extremes": 0.15
+    },
+    {
+      "model": "6_proposed",
+      "horizon": 6,
+      "rmse": 20.689,
+      "recall": 0.28,
+      "precision": 0.463,
+      "f1": 0.369,
+      "auc_pr": 0.357,
+      "fpr_on_extremes": 0.203
+    },
+    {
+      "model": "6_proposed_split",
+      "horizon": 1,
+      "rmse": 15.011,
+      "recall": 0.252,
+      "precision": 0.494,
+      "f1": 0.358,
+      "auc_pr": 0.35,
+      "fpr_on_extremes": 0.0
+    },
+    {
+      "model": "6_proposed_split",
+      "horizon": 3,
+      "rmse": 19.248,
+      "recall": 0.272,
+      "precision": 0.559,
+      "f1": 0.385,
+      "auc_pr": 0.373,
+      "fpr_on_extremes": 0.095
+    },
+    {
+      "model": "6_proposed_split",
+      "horizon": 6,
+      "rmse": 20.579,
+      "recall": 0.276,
+      "precision": 0.404,
+      "f1": 0.37,
+      "auc_pr": 0.364,
+      "fpr_on_extremes": 0.189
+    }
+  ],
+  "subtypes": [
+    {
+      "model": "1_persistence",
+      "fault_type": "bias",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "1_persistence",
+      "fault_type": "drift",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "1_persistence",
+      "fault_type": "dropout",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "1_persistence",
+      "fault_type": "noise",
+      "recall": 0.38,
+      "group": "baselines"
+    },
+    {
+      "model": "1_persistence",
+      "fault_type": "spike",
+      "recall": 0.458,
+      "group": "baselines"
+    },
+    {
+      "model": "1_persistence",
+      "fault_type": "stuck_at",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "bias",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "drift",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "dropout",
+      "recall": 0.018,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "noise",
+      "recall": 0.403,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "spike",
+      "recall": 0.59,
+      "group": "baselines"
+    },
+    {
+      "model": "2_local_gru",
+      "fault_type": "stuck_at",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "bias",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "drift",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "dropout",
+      "recall": 0.016,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "noise",
+      "recall": 0.413,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "spike",
+      "recall": 0.559,
+      "group": "baselines"
+    },
+    {
+      "model": "3_centralised_gru",
+      "fault_type": "stuck_at",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "bias",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "drift",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "dropout",
+      "recall": 0.007,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "noise",
+      "recall": 0.41,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "spike",
+      "recall": 0.584,
+      "group": "baselines"
+    },
+    {
+      "model": "5_fedavg_gru",
+      "fault_type": "stuck_at",
+      "recall": 0.0,
+      "group": "baselines"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "bias",
+      "recall": 0.0,
+      "group": "proposed"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "drift",
+      "recall": 0.0,
+      "group": "proposed"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "dropout",
+      "recall": 0.09,
+      "group": "proposed"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "noise",
+      "recall": 0.28,
+      "group": "proposed"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "spike",
+      "recall": 0.534,
+      "group": "proposed"
+    },
+    {
+      "model": "6_proposed",
+      "fault_type": "stuck_at",
+      "recall": 0.134,
+      "group": "proposed"
+    }
+  ],
+  "operating_points": {
+    "alert": {
+      "recall": 0.315,
+      "precision": 0.48,
+      "f1": 0.39,
+      "fpr_extremes": 0.091
+    },
+    "review": {
+      "recall": 0.575,
+      "precision": 0.066,
+      "f1": 0.118,
+      "fpr_extremes": 0.61
+    },
+    "by_magnitude": [
+      {
+        "band": "<0.5\u03c3",
+        "alert": 0.139,
+        "review": 0.288
+      },
+      {
+        "band": "0.5\u20131\u03c3",
+        "alert": 0.134,
+        "review": 0.378
+      },
+      {
+        "band": "1\u20132\u03c3",
+        "alert": 0.13,
+        "review": 0.642
+      },
+      {
+        "band": "2\u20135\u03c3",
+        "alert": 0.583,
+        "review": 0.923
+      },
+      {
+        "band": ">5\u03c3",
+        "alert": 0.924,
+        "review": 1.0
+      }
+    ],
+    "by_subtype": [
+      {
+        "subtype": "spike",
+        "alert": 0.662,
+        "review": 0.946
+      },
+      {
+        "subtype": "noise",
+        "alert": 0.546,
+        "review": 0.93
+      },
+      {
+        "subtype": "stuck_at",
+        "alert": 0.136,
+        "review": 0.267
+      },
+      {
+        "subtype": "dropout",
+        "alert": 0.12,
+        "review": 0.45
+      },
+      {
+        "subtype": "bias",
+        "alert": 0.006,
+        "review": 0.494
+      },
+      {
+        "subtype": "drift",
+        "alert": 0.0,
+        "review": 0.132
+      }
+    ]
+  },
+  "uncertainty": [
+    {
+      "metric": "F1",
+      "diff": 0.006,
+      "lo": -0.102,
+      "hi": 0.113,
+      "sig": false
+    },
+    {
+      "metric": "AUC-PR",
+      "diff": 0.016,
+      "lo": -0.099,
+      "hi": 0.126,
+      "sig": false
+    },
+    {
+      "metric": "recall",
+      "diff": 0.041,
+      "lo": -0.071,
+      "hi": 0.151,
+      "sig": false
+    },
+    {
+      "metric": "precision",
+      "diff": -0.166,
+      "lo": -0.348,
+      "hi": 0.014,
+      "sig": false
+    }
+  ],
+  "dataset": {
+    "region": "Catalonia (Barcelona)",
+    "stations": 7,
+    "rows": 990598,
+    "years": "2017\u20132024",
+    "fault_rate": 0.02805,
+    "target": "NO2"
+  },
+  "findings": [
+    {
+      "title": "Privacy costs 3\u20138% of forecast accuracy",
+      "detail": "Federated training reaches 15.10/19.38/20.69 RMSE at 1/3/6h against a centralised ST-GNN ceiling of 14.62/18.10/19.21 \u2014 the price of never pooling raw data.",
+      "caveat": "Measured on one test window; not bootstrapped.",
+      "tone": "good"
+    },
+    {
+      "title": "Neighbours detect faults no local model can",
+      "detail": "Stuck-at recall is 0.000 for every rung that looks only at a station's own history \u2014 including the centralised model with full raw access \u2014 and 0.134\u20130.220 for the proposed model, which uses cross-station agreement from compressed embeddings only.",
+      "caveat": "Real under time resampling; not significant when stations are also resampled, at n=7.",
+      "tone": "good"
+    },
+    {
+      "title": "Accuracy is the wrong metric here",
+      "detail": "At a 2.8% fault rate a classifier answering \u201cnever faulty\u201d scores 0.977 accuracy \u2014 higher than this system's 0.976. Recall, precision and AUC-PR are what mean anything.",
+      "caveat": null,
+      "tone": "warn"
+    },
+    {
+      "title": "Drift remains unsolved",
+      "detail": "Slow calibration drift is never detected at the alert operating point. Its per-hour deviation is smaller than normal variation, so no threshold reaches it.",
+      "caveat": "Real sensor drift is ~30\u00d7 slower than the injected version, so this is if anything optimistic.",
+      "tone": "bad"
+    },
+    {
+      "title": "EEA's fault labels contain no reading",
+      "detail": "All 27,783 Validity-flagged rows carry the \u2212999 no-data sentinel, so the readings this project exists to adjudicate are absent rather than wrong. Evaluation uses rate-matched synthetic faults instead.",
+      "caveat": "Injection rate and episode durations are taken from the real data; only the corrupted value is synthesised.",
+      "tone": "warn"
+    }
+  ]
+}
