@@ -126,7 +126,8 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
     # Per-detector scores travel into records.parquet so a different budget or
     # combination rule can be swept offline, without retraining anything.
     detectors = {k: np.full_like(residuals, np.nan, dtype=float)
-                 for k in ("residual", "accumulated", "low_variance", "spatial")}
+                 for k in ("residual", "accumulated", "low_variance", "spatial",
+                           "drift_cusum")}
 
     spatial_by_t0 = (spatial_series.reindex(pd.DatetimeIndex(ws.t0)).to_numpy()
                      if spatial_series is not None else None)
@@ -150,7 +151,10 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
         for name, values in (("residual", scored.residual),
                              ("accumulated", scored.accumulated),
                              ("low_variance", scored.low_variance),
-                             ("spatial", scored.spatial)):
+                             ("spatial", scored.spatial),
+                             ("drift_cusum", scored.drift_cusum)):
+            if values is None:
+                continue
             detectors[name][:, j] = (
                 pd.Series(values, index=ordered.index).reindex(index).to_numpy())
     return out, detectors

@@ -14,8 +14,47 @@ import pytest
 
 from src.models.decision_layer import (
     SENSOR_FAULT, TRUSTWORTHY_BASELINE, TRUSTWORTHY_EVENT, DecisionLayer,
-    low_variance_score, normalise,
+    cusum_score, low_variance_score, normalise,
 )
+
+
+# ---------------------------------------------------------------------------
+# The drift detector
+# ---------------------------------------------------------------------------
+def test_cusum_separates_persistent_drift_from_noise():
+    """The whole point: accumulate a small sustained offset, cancel noise.
+
+    Both halves have the same mean deviation magnitude; only one is one-sided.
+    A rolling mean cannot tell them apart, a CUSUM can.
+    """
+    rng = np.random.default_rng(0)
+    quiet = rng.normal(0, 1, 400)                 # symmetric noise
+    drifting = np.r_[quiet, 0.6 + rng.normal(0, 1, 400)]   # small sustained shift
+
+    score = cusum_score(drifting, slack=0.3, reference=quiet)
+    assert score[:400].max() < score[-1] / 3, "noise must not accumulate"
+    assert score[-1] > 10, "a sustained offset must accumulate without bound"
+
+
+def test_cusum_resets_when_the_offset_stops():
+    rng = np.random.default_rng(1)
+    base = rng.normal(0, 1, 300)
+    series = np.r_[base, 3.0 + rng.normal(0, 1, 100), rng.normal(0, 1, 300)]
+    score = cusum_score(series, slack=0.5, reference=base)
+    assert score[399] > score[-1], "the statistic should decay after the fault ends"
+
+
+def test_cusum_is_flat_on_pure_noise():
+    rng = np.random.default_rng(2)
+    noise = rng.normal(0, 1, 2000)
+    score = cusum_score(noise, slack=0.5, reference=noise)
+    assert np.median(score) < 5.0
+
+
+def test_cusum_tolerates_gaps():
+    series = np.array([0.0, 5.0, np.nan, 5.0, 5.0])
+    score = cusum_score(series, slack=0.0, reference=np.array([0.0, 0.0, 0.0]))
+    assert np.isfinite(score).all()
 
 
 def _frame(n: int = 600, seed: int = 0, with_spatial: bool = True) -> pd.DataFrame:
@@ -42,11 +81,13 @@ def _labels(n: int = 600, rate: float = 0.05, seed: int = 1):
 # Per-detector budgeting
 # ---------------------------------------------------------------------------
 def test_budget_is_split_across_detectors():
-    """Four detectors sharing a 0.10 budget get 0.025 each, not 0.10 each."""
+    """Detectors share the budget rather than each taking the whole of it."""
     frame = _frame()
     labels, extreme = _labels()
     layer = DecisionLayer().fit(frame, labels, extreme, target_fpr_extremes=0.10)
-    assert len(layer._thresholds) == 4
+    n = len(layer._thresholds)
+    assert n == 5, "residual, accumulated, low_variance, spatial, drift_cusum"
+    share = 0.10 / n
     # Each threshold must be strict enough that its own FP rate is within budget.
     parts = layer._parts(frame)
     genuine_extreme = extreme & (labels == 0)
@@ -54,7 +95,7 @@ def test_budget_is_split_across_detectors():
         std = normalise(parts[key], layer._scales[key])
         fired = np.nan_to_num(std, nan=-np.inf) > thr
         rate = float((fired & genuine_extreme).sum() / genuine_extreme.sum())
-        assert rate <= 0.025 + 1e-9, f"{key} exceeded its share of the budget"
+        assert rate <= share + 1e-9, f"{key} exceeded its share of the budget"
 
 
 def test_combined_score_crosses_zero_at_the_operating_point():
@@ -81,7 +122,7 @@ def test_detector_attribution_is_kept():
     labels, extreme = _labels()
     out = DecisionLayer().fit(frame, labels, extreme).score(frame)
     assert set(np.unique(out.which)) <= {
-        "residual", "accumulated", "low_variance", "spatial"}
+        "residual", "accumulated", "low_variance", "spatial", "drift_cusum"}
 
 
 def test_missing_spatial_is_handled():

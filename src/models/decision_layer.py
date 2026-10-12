@@ -67,6 +67,7 @@ class DetectorOutput:
     spatial: np.ndarray
     combined: np.ndarray
     which: np.ndarray            # which detector fired, per reading
+    drift_cusum: np.ndarray | None = None
 
     def as_frame(self, index: pd.Index) -> pd.DataFrame:
         return pd.DataFrame({
@@ -74,6 +75,7 @@ class DetectorOutput:
             "score_accumulated": self.accumulated,
             "score_low_variance": self.low_variance,
             "score_spatial": self.spatial,
+            "score_drift_cusum": self.drift_cusum,
             "score": self.combined,
             "detector": self.which,
         }, index=index)
@@ -98,6 +100,51 @@ def low_variance_score(y: pd.Series, window: int = DEFAULT_VARIANCE_WINDOW,
     rolling_std = y.rolling(window, min_periods=max(2, window // 4)).std()
     typical = float(np.nanmedian(rolling_std.to_numpy())) or 1.0
     return (typical / np.maximum(rolling_std.to_numpy(), floor * typical)).clip(0, 50)
+
+
+def cusum_score(values: np.ndarray, slack: float = 0.5,
+                reference: np.ndarray | None = None) -> np.ndarray:
+    """Page's CUSUM on spatial disagreement — the drift detector.
+
+    Drift defeats every per-reading test for a measurable reason (entry 14): it
+    is injected at 0.8–2.5σ spread over 72+ hours, so the deviation at any one
+    hour is tiny and sits inside normal variation. Averaging over a window
+    helps a little and then stops, because a window wide enough to accumulate
+    the drift is also wide enough to dilute it.
+
+    A CUSUM does not average, it *accumulates*::
+
+        S_t = max(0, S_{t-1} + (x_t - mu - k))
+
+    A persistent half-sigma elevation adds a little every hour and grows
+    without bound; random fluctuation cancels and the statistic falls back to
+    zero. That is precisely the difference between drift and noise, and it is
+    why this is the right shape of test rather than a wider rolling mean.
+
+    ``slack`` (k) is the per-step allowance in MAD units: the statistic only
+    grows where disagreement exceeds the median by more than k, which keeps it
+    pinned at zero during normal operation. ``reference`` supplies the
+    validation distribution so mu and the MAD never come from test.
+    """
+    x = np.asarray(values, dtype=float)
+    ref = reference if reference is not None else x
+    ref = ref[np.isfinite(ref)]
+    if ref.size == 0:
+        return np.zeros_like(x)
+
+    mu = float(np.median(ref))
+    mad = float(np.median(np.abs(ref - mu))) or 1e-9
+    excess = (x - mu) / (1.4826 * mad) - slack
+
+    out = np.zeros_like(x)
+    running = 0.0
+    for i, value in enumerate(excess):
+        if not np.isfinite(value):
+            out[i] = running          # a gap neither accumulates nor resets
+            continue
+        running = max(0.0, running + value)
+        out[i] = running
+    return out
 
 
 def normalise(score: np.ndarray, reference: np.ndarray | None = None) -> np.ndarray:
@@ -125,13 +172,18 @@ class DecisionLayer:
     def __init__(self, residual_windows=DEFAULT_RESIDUAL_WINDOWS,
                  spatial_windows=DEFAULT_SPATIAL_WINDOWS,
                  variance_window: int = DEFAULT_VARIANCE_WINDOW,
-                 use_low_variance: bool = True):
+                 use_low_variance: bool = True,
+                 cusum_slack: float = 0.5):
         self.residual_windows = tuple(residual_windows)
         self.spatial_windows = tuple(spatial_windows)
         self.variance_window = variance_window
         self.use_low_variance = use_low_variance
+        self.cusum_slack = cusum_slack
         self._scales: dict[str, np.ndarray] = {}
         self._thresholds: dict[str, float] = {}
+        #: Raw validation spatial values, so the CUSUM's baseline never comes
+        #: from test. None during fit, when validation is the reference anyway.
+        self._spatial_ref: np.ndarray | None = None
 
     def fit(self, frame: pd.DataFrame, labels: np.ndarray,
             is_extreme: np.ndarray, target_fpr_extremes: float = 0.10,
@@ -163,6 +215,8 @@ class DecisionLayer:
         """
         parts = self._parts(frame)
         self._scales = {k: v.copy() for k, v in parts.items()}
+        if "spatial" in frame.columns and frame["spatial"].notna().any():
+            self._spatial_ref = frame["spatial"].to_numpy(dtype=float)
         standardised = {k: normalise(v, self._scales[k]) for k, v in parts.items()}
 
         # Usability is decided on the RAW outputs: a detector that produced
@@ -211,8 +265,11 @@ class DecisionLayer:
             sp = frame["spatial"].astype(float)
             spatial = np.nanmax(
                 np.vstack([_rolling(sp, w) for w in self.spatial_windows]), axis=0)
+            drift = cusum_score(sp.to_numpy(dtype=float), slack=self.cusum_slack,
+                                reference=self._spatial_ref)
         else:
             spatial = np.full(len(frame), np.nan)
+            drift = np.full(len(frame), np.nan)
 
         low_var = (low_variance_score(frame["y_true"].astype(float),
                                       self.variance_window)
@@ -223,6 +280,7 @@ class DecisionLayer:
             "accumulated": accumulated,
             "low_variance": low_var,
             "spatial": spatial,
+            "drift_cusum": drift,
         }
 
     def score(self, frame: pd.DataFrame) -> DetectorOutput:
@@ -255,6 +313,7 @@ class DecisionLayer:
             accumulated=standardised["accumulated"],
             low_variance=standardised["low_variance"],
             spatial=standardised["spatial"],
+            drift_cusum=standardised["drift_cusum"],
             combined=combined,
             which=which,
         )
