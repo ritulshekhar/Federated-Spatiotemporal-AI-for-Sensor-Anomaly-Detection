@@ -1718,3 +1718,60 @@ They bound it.
    characterised, but it yields a normal-error baseline rather than real fault
    labels. Isolating a genuinely failed sensor would need a deployment where one
    is known to have failed.
+
+---
+
+## [2026-10-12] entry 18 — meteorology: a small, consistent gain at the horizons where it should help
+
+Objective 3 asks for forecasting from "pollutant + meteorological variables",
+and the met half had been unmet since entry 1 because EEA carries no
+meteorology at all. It is now joined from Open-Meteo's ERA5 reanalysis at each
+station's registry coordinates.
+
+### Result (clean data, RMSE median across stations)
+
+| model | horizon | without met | with met | change |
+|---|---|---|---|---|
+| local GRU | 1h | 8.024 | 8.067 | **+0.5%** |
+| local GRU | 3h | 11.866 | 11.705 | **−1.4%** |
+| local GRU | 6h | 13.512 | 13.192 | **−2.4%** |
+| centralised GRU | 6h | 13.770 | 13.336 | **−3.2%** |
+
+**It helps at long horizons and very slightly hurts at 1h.** That is the
+physically expected shape. One hour ahead, the pollutant's own persistence
+carries almost all the information and seven extra features mostly add
+parameters. Six hours ahead, how much air the pollution is mixing into and
+which way the wind is blowing start to matter, and the met data carries real
+signal.
+
+The 6h gain is small but **consistent: all seven stations improve**, by 2.1% to
+4.5%. A uniform sign across independent stations is more convincing than the
+magnitude alone, though it has not been bootstrapped and entry 16's warning
+about this study's statistical power applies here too.
+
+### Boundary-layer height had to be dropped, which is the annoying part
+
+The single most physically relevant variable — it *is* the mixing depth — is
+missing from Open-Meteo's archive for 2024-01-01 to 2024-06-30, 4,368
+consecutive hours, landing squarely in the test window. Since a window needs
+every feature finite, keeping it cost about **45% of the test set**. With entry
+16 having just shown the study underpowered, halving the test window to keep one
+variable was the wrong trade, so it is commented out in `configs/data.yaml`
+with the reason inline. The gain above is therefore a *floor*: the variable most
+likely to help is the one that could not be used.
+
+### Two fixes the fetcher needed
+
+Open-Meteo refuses eight years of seven hourly variables in a single request
+with a 429 — the free tier prices a call by how much data it returns — so
+requests are now chunked by year. And the retry covers dropped connections as
+well as rate limiting, because a free public API does both under load. Stations
+are cached, so a failed run resumes rather than restarting.
+
+### What it does not change
+
+Nothing about detection. Entry 7 established that forecast quality is not the
+binding constraint on fault detection — a better forecaster tracks faults more
+faithfully and *shrinks* the residuals — so a 2-3% RMSE improvement should not
+be expected to move the subtype recalls, and this run was not asked to.
+Objective 3 is now met; objective 4 is unaffected.
