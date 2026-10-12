@@ -195,7 +195,11 @@ preprocessing:
 # reanalysis (Open-Meteo ERA5 archive, free, no API key). This is opt-in and
 # clearly a deviation-by-necessity, not a silent design change.
 meteo:
-  enabled: false
+  # Enabled 2026-10-12. Closes the met half of objective 3. EEA carries no
+  # meteorology, so this is Open-Meteo's ERA5 reanalysis sampled at each
+  # station's registry coordinates — an external dependency and a flagged
+  # deviation, documented in src/data/fetch_meteo.py and CONTEXT.md entry 1.
+  enabled: true
   provider: open_meteo_era5
   variables:
     - temperature_2m
@@ -204,7 +208,14 @@ meteo:
     - wind_speed_10m
     - wind_direction_10m
     - precipitation
-    - boundary_layer_height
+    # boundary_layer_height is DROPPED, reluctantly. It is the most physically
+    # relevant variable here — it sets how much air the pollution mixes into —
+    # but Open-Meteo's ERA5 archive has no values for 2024-01-01..2024-06-30,
+    # 4,368 consecutive hours, which lands squarely in the test window. Since a
+    # window needs every feature finite, keeping it cost ~45% of the test set,
+    # and entry 16 showed the study is already underpowered. Re-enable if the
+    # upstream gap is ever filled.
+    # - boundary_layer_height
 
 # ---------------------------------------------------------------------------
 # Secondary source: CPCB / India (CLAUDE.md §3.2) — Phase 3 ONLY.

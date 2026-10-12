@@ -63,9 +63,9 @@ VARIABLE_RENAME = {
 }
 
 
-def fetch_station_meteo(lat: float, lon: float, start: str, end: str,
-                        variables: list[str], timeout: int = 120) -> pd.DataFrame:
-    """Hourly ERA5 reanalysis at one point, indexed by UTC timestamp."""
+def _fetch_chunk(lat: float, lon: float, start: str, end: str,
+                 variables: list[str], timeout: int, max_retries: int = 5) -> pd.DataFrame:
+    """One Open-Meteo request, with backoff on rate limiting."""
     import requests
 
     params = {
@@ -77,16 +77,60 @@ def fetch_station_meteo(lat: float, lon: float, start: str, end: str,
         "timezone": "UTC",          # §5.2 — UTC at the source, not converted later
         "wind_speed_unit": "ms",
     }
-    resp = requests.get(OPEN_METEO_ARCHIVE, params=params, timeout=timeout)
-    resp.raise_for_status()
-    payload = resp.json()
-    if "hourly" not in payload:
-        raise ValueError(f"unexpected Open-Meteo response: {payload}")
+    delay = 5.0
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(OPEN_METEO_ARCHIVE, params=params, timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            # A free public API drops connections under load as readily as it
+            # returns 429; both are "try again later".
+            log.warning("connection problem (%s..%s): %s; waiting %.0fs",
+                        start, end, type(exc).__name__, delay)
+            time.sleep(delay)
+            delay *= 2
+            continue
+        if resp.status_code == 429:
+            log.warning("rate limited (%s..%s), waiting %.0fs", start, end, delay)
+            time.sleep(delay)
+            delay *= 2
+            continue
+        resp.raise_for_status()
+        payload = resp.json()
+        if "hourly" not in payload:
+            raise ValueError(f"unexpected Open-Meteo response: {payload}")
+        return pd.DataFrame(payload["hourly"])
+    raise RuntimeError(
+        f"Open-Meteo would not serve {start}..{end} after {max_retries} tries. "
+        "The free tier weights long ranges heavily; reduce the year span or the "
+        "variable list in configs/data.yaml. Stations already downloaded are "
+        "cached, so re-running resumes rather than restarting."
+    )
 
-    hourly = payload["hourly"]
-    df = pd.DataFrame(hourly)
+
+def fetch_station_meteo(lat: float, lon: float, start: str, end: str,
+                        variables: list[str], timeout: int = 120,
+                        chunk_years: int = 1, pause_s: float = 2.0) -> pd.DataFrame:
+    """Hourly ERA5 reanalysis at one point, indexed by UTC timestamp.
+
+    Requested one year at a time. Open-Meteo's free tier prices a call by how
+    much data it returns, and eight years of seven hourly variables in a single
+    request is refused outright with a 429.
+    """
+    first, last = pd.Timestamp(start), pd.Timestamp(end)
+    frames = []
+    cursor = first
+    while cursor <= last:
+        stop = min(cursor + pd.DateOffset(years=chunk_years) - pd.Timedelta(days=1), last)
+        frames.append(_fetch_chunk(lat, lon, cursor.strftime("%Y-%m-%d"),
+                                   stop.strftime("%Y-%m-%d"), variables, timeout))
+        cursor = stop + pd.Timedelta(days=1)
+        if cursor <= last:
+            time.sleep(pause_s)
+
+    df = pd.concat(frames, ignore_index=True)
     df["timestamp_utc"] = pd.to_datetime(df.pop("time"), utc=True)
     df = df.rename(columns=VARIABLE_RENAME)
+    df = df.drop_duplicates(subset="timestamp_utc", keep="last")
     return df.set_index("timestamp_utc").sort_index()
 
 
@@ -132,11 +176,29 @@ def fetch_all(start: str, end: str, pause_s: float = 1.0) -> dict[str, Path]:
 
 
 def load_station_meteo(station_id: str) -> pd.DataFrame | None:
-    """Cached met frame for one station, or None if it was never fetched."""
+    """Cached met frame for one station, or None if it was never fetched.
+
+    Filtered to the variables currently configured, not to whatever happens to
+    be on disk. The config is what governs which variables the model uses, so a
+    variable dropped there must stop being a feature without needing a
+    re-download — `boundary_layer_height` is dropped for exactly this reason
+    and its cached column would otherwise still be joined.
+    """
     path = data_paths()["raw"] / "meteo" / f"{station_id}.parquet"
     if not path.exists():
         return None
-    return pd.read_parquet(path)
+
+    df = pd.read_parquet(path)
+    configured = load_config("data").get("meteo", {}).get("variables", [])
+    wanted = {VARIABLE_RENAME.get(v, v) for v in configured}
+    # wind_direction is consumed as sin/cos downstream, so keep it under either
+    # name if it was asked for.
+    keep = [c for c in df.columns if c in wanted]
+    dropped = [c for c in df.columns if c not in wanted]
+    if dropped:
+        log.info("%s | ignoring %d cached met column(s) not in the config: %s",
+                 station_id, len(dropped), dropped)
+    return df[keep]
 
 
 def main() -> None:
