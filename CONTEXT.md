@@ -1482,3 +1482,80 @@ Both tiers are computed offline from the `det_*` columns in
 `records.parquet`, so changing either costs seconds. 8 new tests (79 total),
 including that a looser budget can never flag less, and that altering test
 rows cannot move a threshold.
+
+---
+
+## [2026-10-12] entry 15 — the CUSUM drift detector: right idea, wrong bottleneck
+
+Entry 14 established that drift is invisible *per reading* because it is small
+per reading — injected at 0.8–2.5σ spread over 72+ hours. The implied fix was a
+statistic that accumulates rather than averages, so Page's CUSUM was added as a
+fifth detector, running on the spatial disagreement (not the residual, since
+entry 7 showed the forecaster tracks drift and its residual never grows).
+
+### It does exactly what it was designed to do
+
+ALERT tier, h=1, with and without:
+
+| | 4 detectors | 5 with CUSUM |
+|---|---|---|
+| bias | 0.006 | **0.093** |
+| stuck-at | 0.136 | **0.160** |
+| 1–2σ band | 0.130 | **0.213** |
+| 0.5–1σ band | 0.134 | **0.160** |
+| <0.5σ band | 0.139 | **0.175** |
+
+Small, persistent faults improve sharply — bias by a factor of fifteen, the
+1–2σ magnitude band by 64%. The mechanism works.
+
+### And it costs more than it gains
+
+| | 4 detectors | 5 with CUSUM |
+|---|---|---|
+| spike | **0.662** | 0.643 |
+| noise | **0.546** | 0.523 |
+| 2–5σ band | **0.583** | 0.539 |
+| >5σ band | **0.924** | 0.915 |
+| **aggregate F1** | **0.390** | 0.310 |
+| precision | 0.480 | **0.528** |
+
+The cause is budget dilution, and it is structural rather than a tuning
+accident: five detectors share the same total false-positive allowance, so each
+gets a fifth instead of a quarter and **every pre-existing detector is
+tightened**. The CUSUM buys small faults by making the others worse at large
+ones.
+
+**Default is therefore off** (`use_drift_cusum: false`), kept available for
+deployments where small persistent faults are the priority. Shipping a 20%
+aggregate F1 regression as a default would not be an improvement.
+
+### Drift is still 0.000, and now we know why
+
+The CUSUM did not move drift at all. The diagnosis is clear and it is not the
+temporal statistic: **the bottleneck is the embedding.** Entry 8 measured
+raw-neighbour comparison catching drift at 0.149; entry 10 measured the
+embedding-based version at 0.027, 18% of that ceiling. A CUSUM amplifies
+persistent signal, and there is almost no persistent drift signal in the
+reconstruction error to amplify. You cannot accumulate information the
+compression discarded.
+
+So the open problem has moved, usefully. It is no longer "find a better
+temporal statistic for drift" — that has been tried three ways now
+(accumulation in entry 7, uncontaminated reference in entry 7, CUSUM here).
+It is **"get a drift-sensitive signal through the privacy boundary"**.
+
+One concrete candidate, flagged rather than implemented because it touches
+§2.4: the reconstruction error is unsigned and derived from a hidden state
+optimised for *forecasting*, which need not encode absolute level at all. A
+drifting station's level is what diverges. Uploading a small signed summary of
+the station's own normalised level deviation would carry that directly — and
+whether that counts as a normalization statistic under §2.4 is a judgement
+call for the project owner, not one to make silently. It is not the scaler, but
+it is derived from it.
+
+### Budget-splitting is now a known cost
+
+A general lesson worth carrying: under a shared false-positive budget, adding a
+detector is never free. Each new one must earn more than the 1/k tightening it
+imposes on every existing detector. The CUSUM does not, at this operating
+point, against this mix of faults.

@@ -173,12 +173,20 @@ class DecisionLayer:
                  spatial_windows=DEFAULT_SPATIAL_WINDOWS,
                  variance_window: int = DEFAULT_VARIANCE_WINDOW,
                  use_low_variance: bool = True,
-                 cusum_slack: float = 0.5):
+                 cusum_slack: float = 0.5,
+                 use_drift_cusum: bool = False):
         self.residual_windows = tuple(residual_windows)
         self.spatial_windows = tuple(spatial_windows)
         self.variance_window = variance_window
         self.use_low_variance = use_low_variance
         self.cusum_slack = cusum_slack
+        # MEASURED off by default (CONTEXT.md entry 15). The CUSUM does what it
+        # was built for — small persistent faults improve sharply, bias 0.006 ->
+        # 0.093 and the 1-2σ band 0.130 -> 0.213 — but a fifth detector takes a
+        # fifth of the shared budget instead of a quarter, tightening every
+        # other detector, and aggregate F1 falls 0.390 -> 0.310. Turn it on when
+        # small persistent faults are what you care about.
+        self.use_drift_cusum = use_drift_cusum
         self._scales: dict[str, np.ndarray] = {}
         self._thresholds: dict[str, float] = {}
         #: Raw validation spatial values, so the CUSUM's baseline never comes
@@ -261,15 +269,16 @@ class DecisionLayer:
                        if w > 1]) if len(self.residual_windows) > 1
             else residual.to_numpy(dtype=float)[None, :], axis=0)
 
+        drift = np.full(len(frame), np.nan)
         if "spatial" in frame.columns and frame["spatial"].notna().any():
             sp = frame["spatial"].astype(float)
             spatial = np.nanmax(
                 np.vstack([_rolling(sp, w) for w in self.spatial_windows]), axis=0)
-            drift = cusum_score(sp.to_numpy(dtype=float), slack=self.cusum_slack,
-                                reference=self._spatial_ref)
+            if self.use_drift_cusum:
+                drift = cusum_score(sp.to_numpy(dtype=float), slack=self.cusum_slack,
+                                    reference=self._spatial_ref)
         else:
             spatial = np.full(len(frame), np.nan)
-            drift = np.full(len(frame), np.nan)
 
         low_var = (low_variance_score(frame["y_true"].astype(float),
                                       self.variance_window)

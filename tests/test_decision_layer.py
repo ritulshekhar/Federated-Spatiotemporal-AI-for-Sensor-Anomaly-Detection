@@ -1,6 +1,6 @@
-"""The §7.4 decision layer: four detectors, each on its own budget.
+﻿"""The Â§7.4 decision layer: four detectors, each on its own budget.
 
-Entry 10 measured what happens without per-detector budgets — recall doubled
+Entry 10 measured what happens without per-detector budgets â€” recall doubled
 but precision fell from 0.722 to 0.173, because combining four detectors with
 a maximum and one threshold gives every reading four chances to clear one bar.
 These tests pin the fix.
@@ -84,7 +84,7 @@ def test_budget_is_split_across_detectors():
     """Detectors share the budget rather than each taking the whole of it."""
     frame = _frame()
     labels, extreme = _labels()
-    layer = DecisionLayer().fit(frame, labels, extreme, target_fpr_extremes=0.10)
+    layer = DecisionLayer(use_drift_cusum=True).fit(frame, labels, extreme, target_fpr_extremes=0.10)
     n = len(layer._thresholds)
     assert n == 5, "residual, accumulated, low_variance, spatial, drift_cusum"
     share = 0.10 / n
@@ -120,7 +120,7 @@ def test_scoring_before_fitting_is_refused():
 def test_detector_attribution_is_kept():
     frame = _frame()
     labels, extreme = _labels()
-    out = DecisionLayer().fit(frame, labels, extreme).score(frame)
+    out = DecisionLayer(use_drift_cusum=True).fit(frame, labels, extreme).score(frame)
     assert set(np.unique(out.which)) <= {
         "residual", "accumulated", "low_variance", "spatial", "drift_cusum"}
 
@@ -163,7 +163,7 @@ def test_a_quiet_but_working_sensor_scores_far_below_a_frozen_one():
 
 
 # ---------------------------------------------------------------------------
-# §7.4's three-way call
+# Â§7.4's three-way call
 # ---------------------------------------------------------------------------
 def test_high_agreement_means_real_event_not_fault():
     """The Gupchup (2019) control, made mechanical."""
@@ -187,3 +187,5 @@ def test_normalise_is_robust_to_outliers():
     z = normalise(x)
     assert abs(float(np.median(z))) < 0.1
     assert z[-1] > 50
+
+
