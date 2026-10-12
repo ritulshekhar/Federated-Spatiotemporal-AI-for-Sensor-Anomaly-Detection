@@ -1631,3 +1631,90 @@ the single test window gave. What was missing is that most of the gaps between
 rungs are smaller than the uncertainty around them. The subtype claims survive
 better than the aggregate ones, which is a reversal of how they were originally
 emphasised.
+
+---
+
+## [2026-10-12] entry 17 — real co-located sensor error, and what it says about the fault model
+
+§2.1a's stretch goal was to replace synthetic injection with real
+plausible-but-wrong readings, via co-located reference-vs-low-cost-sensor data
+of the kind Ferrer-Cid et al. (2022) used. That data now exists in the repo.
+
+**Source.** H2020 CAPTOR (Zenodo 2564825, CC-BY-4.0): MOX ozone sensors across
+Catalonia, summer 2018, several placed *at* official stations for calibration.
+Pairing node coordinates against the EEA registry gives **five co-locations,
+four within 150 metres** — and one of them, Ciutadella, is already a node in
+this project. Joined against EEA reference O3 for the same hours: **6,763
+paired hours**.
+
+### What real sensor error looks like
+
+In units of each reference station's own sigma:
+
+| node | location | hours | bias | error sd | drift/72h | autocorr 1h | \|err\|>1σ | \|err\|>2σ |
+|---|---|---|---|---|---|---|---|---|
+| 9 | Vic | 2132 | +0.07 | 0.51 | +0.007 | 0.83 | 5.7% | 0.1% |
+| 13 | Manlleu | 1699 | −0.15 | 0.47 | +0.015 | 0.80 | 3.9% | 0.1% |
+| 16 | Ciutadella | 696 | −0.27 | 0.63 | +0.007 | 0.74 | 11.4% | 1.6% |
+| 18 | Badalona | 930 | −0.02 | 0.81 | +0.009 | 0.83 | 19.0% | 1.6% |
+| 22 | Tona | 1306 | −0.09 | 0.48 | −0.019 | 0.74 | 4.8% | 0.0% |
+
+### The injected fault model is too aggressive, and drift badly so
+
+| | real | injected |
+|---|---|---|
+| persistent bias | **0.09σ** | 0.50–2.00σ |
+| drift over 72h | **0.01σ** | 0.80–2.50σ |
+| \|error\| > 2σ | **0.1%** of hours | — |
+
+Injected bias is 5–20× larger than the real figure. Injected **drift is roughly
+thirty times faster**: real sensors drift about 0.01σ per 72 hours, which over
+an entire summer accumulates to ~0.3σ, while the injector reaches 0.8–2.5σ
+within the first 72.
+
+**So the 0.000 drift recall reported throughout is, if anything, optimistic.**
+Real drift is slower and smaller than the version the detector already fails to
+find.
+
+### The important caveat: this measures healthy sensors, not faulty ones
+
+The CAPTOR release is the *calibrated* product — the description states the data
+are fitted by multiple linear regression and validated against the local
+reference network. So these numbers describe **residual error in working
+sensors**, not sensor faults. No instrument in this dataset is identifiable as
+having failed.
+
+That makes it the wrong dataset for *fault labels* and the right one for
+something arguably more useful: an empirical measurement of **what normal
+looks like**, which is precisely what a fault has to be distinguished from.
+
+And read that way it corroborates entry 7's central finding from real data.
+Normal low-cost sensor error has a standard deviation of 0.47–0.81σ and exceeds
+1σ in 4–19% of hours. An injected bias of 0.5–2σ therefore sits *inside or at
+the edge of the normal error band of a real sensor*. The reason bias and drift
+are undetectable is not a modelling failure; it is that a deviation of that size
+is indistinguishable from ordinary sensor behaviour, now measured on real
+hardware rather than argued from synthetic data.
+
+One further point in favour of the accumulation approach: real error is strongly
+autocorrelated (1h 0.80, 24h 0.63). Real deviations persist, which is the
+property CUSUM-style detectors exploit — the mechanism is right even where the
+magnitudes defeat it.
+
+### Caveat on instrument class
+
+A low-cost MOX sensor is not a reference-grade analyser. These magnitudes are an
+**upper bound** on what an EEA station's own error would be, so they should not
+be read as the error distribution of the stations this project actually models.
+They bound it.
+
+### What this changes
+
+1. The injected **drift rate should be slowed by roughly 30×** to be realistic;
+   the current setting makes drift look more detectable than it is.
+2. Injected **bias magnitude is defensible** — it overlaps the real normal band,
+   which is what makes it a genuinely hard case rather than an easy one.
+3. §2.1a's stretch goal is **partly met**: real co-located data is integrated and
+   characterised, but it yields a normal-error baseline rather than real fault
+   labels. Isolating a genuinely failed sensor would need a deployment where one
+   is known to have failed.
