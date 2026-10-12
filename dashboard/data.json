@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-12 18:15 UTC",
+  "generated": "2026-10-12 22:50 UTC",
   "stations": [
     {
       "id": "ES1438A",
@@ -1237,7 +1237,7 @@
     {
       "title": "Drift remains unsolved",
       "detail": "Slow calibration drift is never detected at the alert operating point. Its per-hour deviation is smaller than normal variation, so no threshold reaches it.",
-      "caveat": "Real sensor drift is ~30\u00d7 slower than the injected version, so this is if anything optimistic.",
+      "caveat": "Measured against an injector that drifted ~100\u00d7 faster than real co-located sensors do, so this is optimistic: the detector missed drift far coarser than the real thing. The injector is fixed; these numbers predate it.",
       "tone": "bad"
     },
     {

@@ -141,8 +141,10 @@ def findings_block() -> list[dict]:
             "detail": "Slow calibration drift is never detected at the alert "
                       "operating point. Its per-hour deviation is smaller than "
                       "normal variation, so no threshold reaches it.",
-            "caveat": "Real sensor drift is ~30× slower than the injected "
-                      "version, so this is if anything optimistic.",
+            "caveat": "Measured against an injector that drifted ~100× faster "
+                      "than real co-located sensors do, so this is optimistic: "
+                      "the detector missed drift far coarser than the real "
+                      "thing. The injector is fixed; these numbers predate it.",
             "tone": "bad",
         },
         {
