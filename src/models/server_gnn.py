@@ -51,7 +51,8 @@ def build_adjacency(station_ids: list[str],
                     mode: str = "hybrid",
                     distance_km_threshold: float = 12.0,
                     hidden_states: np.ndarray | None = None,
-                    correlation_threshold: float = 0.5) -> np.ndarray:
+                    correlation_threshold: float = 0.5,
+                    self_loops: bool = False) -> np.ndarray:
     """Binary adjacency, zero diagonal.
 
     ``distance`` uses physical proximity, which Wang et al. (2020) justifies for
@@ -84,7 +85,13 @@ def build_adjacency(station_ids: list[str],
             np.fill_diagonal(corr, 0.0)
             adj = np.maximum(adj, (corr >= correlation_threshold).astype(float))
 
-    np.fill_diagonal(adj, 0.0)       # LOCKED: a node never informs itself
+    # Whether a node may inform itself depends entirely on the task.
+    # Reconstruction (rung 6) must exclude it — a node that sees its own state
+    # reconstructs it perfectly and the disagreement becomes noise.
+    # Forecasting (rung 4) must include it — a station's own history is its
+    # single best predictor, and withholding it would cripple the ceiling.
+    np.fill_diagonal(adj, 1.0 if self_loops else 0.0)
+
     isolated = [station_ids[i] for i in range(n) if adj[i].sum() == 0]
     if isolated:
         log.warning("%d station(s) have no neighbours and cannot be scored "

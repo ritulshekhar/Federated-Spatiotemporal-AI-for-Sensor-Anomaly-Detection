@@ -417,11 +417,105 @@ def align_features(stations: list[StationData]) -> tuple[list[str], dict[str, np
 # ---------------------------------------------------------------------------
 # Rungs 4-6 — Phase 2
 # ---------------------------------------------------------------------------
-def rung4_centralised_stgnn(*_args, **_kwargs):
-    raise NotImplementedError(
-        "Rung 4 (centralised ST-GNN, the accuracy ceiling) is Phase 2. §8.1: "
-        "rungs 1-3 must be working and reported first."
+def _aligned_windows(stations: list[StationData], per_station_idx: dict,
+                     split: str):
+    """(n, n_stations, L, F) inputs and (n, n_stations, H) targets.
+
+    Only window origins present at *every* station can be used: a centralised
+    spatial model needs all nodes for the same hour. Returns the common ``t0``
+    and, for each station, the positions those rows occupy in its own arrays,
+    so predictions can be mapped back per station afterwards.
+    """
+    t0s = [st.splits[split].t0 for st in stations]
+    common = t0s[0]
+    for t in t0s[1:]:
+        common = np.intersect1d(common, t)
+    if common.size == 0:
+        raise ValueError(f"no window origins common to all stations in {split!r}")
+
+    X, y, positions = [], [], {}
+    for st in stations:
+        ws = st.splits[split]
+        order = np.argsort(ws.t0)
+        pos = order[np.searchsorted(ws.t0[order], common)]
+        positions[st.station_id] = pos
+        X.append(ws.X[pos][:, :, per_station_idx[st.station_id]])
+        y.append(ws.y[pos])
+    return np.stack(X, axis=1), np.stack(y, axis=1), common, positions
+
+
+def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
+                            seed: int = 1337, **score_kwargs):
+    """§8.1 rung 4 — the accuracy ceiling, with no privacy constraint at all.
+
+    Raw windows from every station, held centrally and trained jointly. The gap
+    between this and rung 5/6 is what privacy costs.
+    """
+    import torch
+
+    from src.data.station_metadata import coordinates
+    from src.models.server_gnn import build_adjacency
+    from src.models.st_gnn import SpatioTemporalGNN, predict, train_stgnn
+
+    torch.manual_seed(seed)
+    common_features, per_station_idx = align_features(stations)
+    target = stations[0].target
+    horizon = stations[0].splits["train"].horizon
+    station_ids = [st.station_id for st in stations]
+
+    data = {s: _aligned_windows(stations, per_station_idx, s)
+            for s in ("train", "val", "test")}
+    log.info("rung 4: %d common feature(s), %s/%s/%s aligned windows",
+             len(common_features), f"{len(data['train'][0]):,}",
+             f"{len(data['val'][0]):,}", f"{len(data['test'][0]):,}")
+
+    gcfg = model_cfg["server_gnn"]
+    adjacency = build_adjacency(
+        station_ids, coordinates(), mode=gcfg["graph"]["mode"],
+        distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
+        # build_adjacency averages the trailing axis per station, so flatten
+        # each station's (hours x features) window into one vector.
+        hidden_states=(None if gcfg["graph"]["mode"] == "distance" else
+                       data["train"][0].reshape(len(data["train"][0]),
+                                                len(stations), -1)),
+        correlation_threshold=gcfg["graph"]["correlation_threshold"],
+        self_loops=True,      # forecasting: a station's own history is allowed
     )
+
+    model = SpatioTemporalGNN(
+        n_features=len(common_features), adjacency=adjacency,
+        hidden_size=gcfg["hidden_size"], horizon=horizon,
+        num_layers=gcfg["num_layers"], dropout=gcfg["dropout"],
+        target_index=common_features.index(target),
+    )
+    history = train_stgnn(
+        model, data["train"][0], data["train"][1],
+        data["val"][0], data["val"][1],
+        **{k: v for k, v in model_cfg.get("centralised_gru", {}).get("train", {}).items()
+           if k in ("epochs", "lr", "batch_size", "grad_clip")},
+    )
+
+    preds = {s: predict(model, data[s][0]) for s in ("val", "test")}
+
+    records, thresholds = [], {}
+    for i, st in enumerate(stations):
+        # Scatter the aligned predictions back into each station's own window
+        # order; windows the intersection dropped stay NaN and are excluded.
+        full = {}
+        for split in ("val", "test"):
+            ws = st.splits[split]
+            arr = np.full((len(ws), horizon), np.nan, dtype=np.float32)
+            arr[data[split][3][st.station_id]] = preds[split][:, i, :]
+            full[split] = arr
+        r, thr = score_station(st, "4_centralised_stgnn", full["val"], full["test"],
+                               **score_kwargs)
+        records.append(r)
+        thresholds[("4_centralised_stgnn", st.station_id)] = thr
+
+    return (pd.concat(records, ignore_index=True), thresholds,
+            history.as_dict() | {"graph_edges": int(adjacency.sum()),
+                                 "aligned_windows": {s: int(len(data[s][0]))
+                                                     for s in data}})
 
 
 def rung5_fedavg_gru(stations: list[StationData], model_cfg: dict,
@@ -658,6 +752,13 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         all_thresholds.update(thr)
         extras["rung3_history"] = hist
 
+    if 4 in rungs:
+        rec, thr, hist = rung4_centralised_stgnn(stations, model_cfg, seed=seed,
+                                                 **score_kwargs)
+        all_records.append(rec)
+        all_thresholds.update(thr)
+        extras["rung4_history"] = hist
+
     if 5 in rungs:
         rec, thr, hist = rung5_fedavg_gru(
             stations, model_cfg, load_config("federation"), seed=seed,
@@ -725,13 +826,9 @@ def main() -> None:
                     help="anomaly score form (default: configs/model.yaml)")
     args = ap.parse_args()
 
-    unsupported = [r for r in args.rungs if r not in (1, 2, 3, 5, 6)]
+    unsupported = [r for r in args.rungs if r not in (1, 2, 3, 4, 5, 6)]
     if unsupported:
-        raise SystemExit(
-            f"rung(s) {unsupported} are not implemented yet. Rung 4 "
-            "(centralised ST-GNN, the accuracy ceiling) is still to build; "
-            "see §8.1."
-        )
+        raise SystemExit(f"unknown rung(s) {unsupported}; §8.1 defines 1-6.")
 
     seed_everything(load_config("model").get("seed", 1337))
     out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name,
