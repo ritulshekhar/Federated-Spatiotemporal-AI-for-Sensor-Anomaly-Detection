@@ -266,13 +266,21 @@ def calibrate_threshold(score: np.ndarray, method: str = "quantile",
                     ``is_extreme``. Use when the cost of crying wolf on a real
                     pollution episode outweighs missed faults — which §8.2
                     argues is the usual case here.
+      ``val_fpr_overall``  the lowest threshold whose false-positive rate on
+                    **all** trustworthy validation readings stays under
+                    ``target_fpr_extremes`` (reused as the budget). Needs
+                    ``labels``. This is the one that controls precision:
+                    extremes are only the top few percent of readings, so
+                    capping false positives there leaves the other 95%
+                    unconstrained — measured in CONTEXT.md entry 11, where
+                    per-detector extreme-budgets sent precision to 0.027.
     """
     s = np.asarray(score, dtype=float).ravel()
     keep = np.isfinite(s)
     if mask is not None:
         keep &= np.asarray(mask, dtype=bool).ravel()
 
-    if method in ("val_f1_sweep", "val_fpr_extremes"):
+    if method in ("val_f1_sweep", "val_fpr_extremes", "val_fpr_overall"):
         if labels is None:
             raise ValueError(f"method {method!r} needs validation labels")
         y = np.asarray(labels).ravel()
@@ -307,6 +315,15 @@ def calibrate_threshold(score: np.ndarray, method: str = "quantile",
             if f1 > best_f1:
                 best_t, best_f1 = float(t), f1
         return best_t
+
+    if method == "val_fpr_overall":
+        genuine = ~y
+        if genuine.sum() == 0:
+            return float(np.quantile(s_keep, quantile))
+        for t in candidates:                  # ascending: first pass wins
+            if float(((s_keep > t) & genuine).sum() / genuine.sum()) <= target_fpr_extremes:
+                return float(t)
+        return float(candidates[-1])
 
     # val_fpr_extremes
     if is_extreme is None:

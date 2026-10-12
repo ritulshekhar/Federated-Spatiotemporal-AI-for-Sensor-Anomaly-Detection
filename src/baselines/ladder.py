@@ -113,7 +113,9 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
                      spatial_series: pd.Series | None, fit: bool,
                      labels: np.ndarray | None = None,
                      is_extreme: np.ndarray | None = None,
-                     target_fpr_extremes: float = 0.10) -> np.ndarray:
+                     target_fpr_extremes: float = 0.10,
+                     budget_on: str = "overall",
+                     target_fpr_overall: float = 0.005) -> tuple[np.ndarray, dict]:
     """Run the decision-layer ensemble per horizon, returning (n_windows, horizon).
 
     Each horizon is a separate stride-1 time series, so its rolling statistics
@@ -121,6 +123,10 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
     """
     residuals = np.abs(pred_raw - ws.y_raw) / max(scale, 1e-8)
     out = np.empty_like(residuals, dtype=float)
+    # Per-detector scores travel into records.parquet so a different budget or
+    # combination rule can be swept offline, without retraining anything.
+    detectors = {k: np.full_like(residuals, np.nan, dtype=float)
+                 for k in ("residual", "accumulated", "low_variance", "spatial")}
 
     spatial_by_t0 = (spatial_series.reindex(pd.DatetimeIndex(ws.t0)).to_numpy()
                      if spatial_series is not None else None)
@@ -136,10 +142,18 @@ def _decision_scores(layers, ws, pred_raw: np.ndarray, scale: float,
             order = np.argsort(index.to_numpy())
             layer.fit(ordered, labels=labels[:, j][order],
                       is_extreme=is_extreme[:, j][order],
-                      target_fpr_extremes=target_fpr_extremes)
+                      target_fpr_extremes=target_fpr_extremes,
+                      budget_on=budget_on,
+                      target_fpr_overall=target_fpr_overall)
         scored = layer.score(ordered)
         out[:, j] = pd.Series(scored.combined, index=ordered.index).reindex(index).to_numpy()
-    return out
+        for name, values in (("residual", scored.residual),
+                             ("accumulated", scored.accumulated),
+                             ("low_variance", scored.low_variance),
+                             ("spatial", scored.spatial)):
+            detectors[name][:, j] = (
+                pd.Series(values, index=ordered.index).reindex(index).to_numpy())
+    return out, detectors
 
 
 def score_station(station: StationData, model_name: str,
@@ -152,6 +166,8 @@ def score_station(station: StationData, model_name: str,
                   volatility_floor: float = 0.25,
                   target_fpr_extremes: float = 0.10,
                   spatial: dict[str, pd.Series] | None = None,
+                  budget_on: str = "overall",
+                  target_fpr_overall: float = 0.005,
                   ) -> tuple[pd.DataFrame, float]:
     """Turn one station's forecasts into prediction records and a threshold.
 
@@ -188,18 +204,22 @@ def score_station(station: StationData, model_name: str,
         # to test. One DecisionLayer per horizon, because each horizon is its
         # own time-ordered series and the rolling statistics must not mix them.
         layers = [DecisionLayer() for _ in range(val.horizon)]
-        val_score = _decision_scores(layers, val, val_pred_raw, scale,
-                                     spatial.get("val"), fit=True,
-                                     labels=val_codes, is_extreme=val_extreme,
-                                     target_fpr_extremes=target_fpr_extremes)
-        test_score = _decision_scores(layers, test, test_pred_raw, scale,
-                                      spatial.get("test"), fit=False)
+        val_score, val_detectors = _decision_scores(
+            layers, val, val_pred_raw, scale, spatial.get("val"), fit=True,
+            labels=val_codes, is_extreme=val_extreme,
+            target_fpr_extremes=target_fpr_extremes,
+            budget_on=budget_on, target_fpr_overall=target_fpr_overall)
+        test_score, test_detectors = _decision_scores(
+            layers, test, test_pred_raw, scale, spatial.get("test"), fit=False)
+        detector_scores = {"val": val_detectors, "test": test_detectors}
     elif score_mode == "volatility":
+        detector_scores = None
         val_score = volatility_scaled_score(
             val.y_raw, val_pred_raw, val_vol[:, None], vol_floor)
         test_score = volatility_scaled_score(
             test.y_raw, test_pred_raw, test_vol[:, None], vol_floor)
     elif score_mode == "absolute":
+        detector_scores = None
         val_score = residual_score(val.y_raw, val_pred_raw, scale)
         test_score = residual_score(test.y_raw, test_pred_raw, scale)
     else:
@@ -236,7 +256,7 @@ def score_station(station: StationData, model_name: str,
         ("test", test, test_pred_raw, test_score, test_vol, is_extreme),
     ):
         codes = ws.labels_for(source)
-        frames.append(make_records(
+        rec = make_records(
             model=model_name,
             station_id=station.station_id,
             region=ws.region,
@@ -254,7 +274,11 @@ def score_station(station: StationData, model_name: str,
             local_volatility=vol,
             score=sc,
             horizons=list(range(1, ws.horizon + 1)),
-        ))
+        )
+        if detector_scores is not None:
+            for name, values in detector_scores[split_name].items():
+                rec[f"det_{name}"] = values.ravel()
+        frames.append(rec)
 
     return pd.concat(frames, ignore_index=True), float(threshold)
 
@@ -608,6 +632,9 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
         "score_mode": score_mode or sc.get("mode", "volatility"),
         "volatility_floor": sc.get("volatility_floor", 0.25),
     }
+    budget = model_cfg["decision_layer"].get("detector_budget", {})
+    score_kwargs["budget_on"] = budget.get("on", "overall")
+    score_kwargs["target_fpr_overall"] = float(budget.get("target_fpr_overall", 0.005))
     log.info("scoring: mode=%s threshold=%s", score_kwargs["score_mode"],
              score_kwargs["threshold_method"])
 

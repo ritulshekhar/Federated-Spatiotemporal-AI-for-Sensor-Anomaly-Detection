@@ -134,7 +134,9 @@ class DecisionLayer:
         self._thresholds: dict[str, float] = {}
 
     def fit(self, frame: pd.DataFrame, labels: np.ndarray,
-            is_extreme: np.ndarray, target_fpr_extremes: float = 0.10) -> "DecisionLayer":
+            is_extreme: np.ndarray, target_fpr_extremes: float = 0.10,
+            budget_on: str = "overall",
+            target_fpr_overall: float = 0.02) -> "DecisionLayer":
         """Calibrate each detector separately, on validation, to its own budget.
 
         This is the fix for the precision collapse measured in entry 10.
@@ -143,13 +145,21 @@ class DecisionLayer:
         false positives compound — recall doubled but precision fell from 0.722
         to 0.173.
 
-        Here each detector gets ``target_fpr_extremes / k`` of the budget, so
-        by the union bound the combined false-positive rate on genuine extremes
-        stays under the target no matter how many detectors run. Each
-        detector's score is then expressed as its *margin* over its own
-        threshold, which puts them on a comparable footing: the combined score
-        crosses zero exactly when some detector has exceeded its own budgeted
-        operating point.
+        Each detector gets ``budget / k``, so by the union bound the combined
+        false-positive rate stays under the target no matter how many detectors
+        run. Each detector's score is then expressed as its *margin* over its
+        own threshold, which puts them on a comparable footing: the combined
+        score crosses zero exactly when some detector has exceeded its own
+        budgeted operating point.
+
+        **``budget_on`` must be "overall", and entry 11 is why.** Budgeting on
+        *extremes* looks right — §8.2 cares most about crying wolf on real
+        episodes — but extremes are only the top few percent of readings, so
+        capping false positives there leaves the other 95% entirely
+        unconstrained. Four detectors each taking the lowest threshold that
+        satisfied an extremes-only budget drove precision to **0.027**, worse
+        than the single-threshold version it was meant to fix. Budgeting on all
+        trustworthy readings is what actually controls precision.
         """
         parts = self._parts(frame)
         self._scales = {k: v.copy() for k, v in parts.items()}
@@ -158,15 +168,21 @@ class DecisionLayer:
         # Usability is decided on the RAW outputs: a detector that produced
         # nothing must not claim a share of the budget.
         usable = [k for k, v in parts.items() if np.isfinite(v).any()]
-        budget = target_fpr_extremes / max(len(usable), 1)
-        log.info("decision layer: %d detector(s), %.3f FP budget each",
-                 len(usable), budget)
+        if budget_on == "overall":
+            method, total = "val_fpr_overall", target_fpr_overall
+        elif budget_on == "extremes":
+            method, total = "val_fpr_extremes", target_fpr_extremes
+        else:
+            raise ValueError(f"budget_on must be 'overall' or 'extremes', got {budget_on!r}")
+        budget = total / max(len(usable), 1)
+        log.info("decision layer: %d detector(s), %s budget %.4f each",
+                 len(usable), budget_on, budget)
 
         self._thresholds = {}
         for key in usable:
             try:
                 self._thresholds[key] = calibrate_threshold(
-                    standardised[key], method="val_fpr_extremes",
+                    standardised[key], method=method,
                     labels=labels, is_extreme=is_extreme,
                     target_fpr_extremes=budget,
                 )

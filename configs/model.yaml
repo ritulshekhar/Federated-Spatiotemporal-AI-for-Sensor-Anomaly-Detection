@@ -103,5 +103,22 @@ decision_layer:
     metric: cosine            # cosine | learned
     high_agreement_threshold: 0.6
     min_neighbours: 2
+
+  # Per-detector false-positive budget for the rung 6 ensemble, shared across
+  # however many detectors are active (§7.4). MEASURED by sweep, CONTEXT.md
+  # entry 11: F1 falls monotonically as the budget loosens — 0.396 at 0.005,
+  # 0.296 at 0.02, 0.091 at 0.40 — so the tightest setting wins on aggregate.
+  #
+  # `on: overall` budgets false positives across ALL trustworthy readings.
+  # Budgeting on extremes instead leaves the other ~95% of readings
+  # unconstrained and drove precision to 0.027.
+  #
+  # Loosening this is a deliberate choice, not a bug: drift recall climbs from
+  # 0.000 at 0.005 to 0.257 at 0.40, at a precision of 0.049. See entry 11 on
+  # why a drift review queue may want that operating point even though an
+  # alerting system never would.
+  detector_budget:
+    on: overall               # overall | extremes
+    target_fpr_overall: 0.005
   # LOCKED (§7.4): never one global threshold silently inherited across regions.
   per_region_calibration: true

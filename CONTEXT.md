@@ -1127,3 +1127,116 @@ mechanism with a clearly identified next fix, not a finished system.
    state, to test whether compression or timescale is the limiting factor.
 3. Rung 4 (centralised ST-GNN) still unbuilt — the forecasting ceiling.
 4. Carried: meteorology disabled; India untestable without an OpenAQ key.
+
+---
+
+## [2026-10-12] entry 11 — fixing the precision collapse, and the trade-off curve it exposed
+
+Entry 10's rung 6 doubled recall but dropped precision from 0.722 to 0.173,
+because four standardised detectors were combined by **maximum** against a
+**single** threshold: four chances to clear one bar, so false positives
+compound. Three fixes were tried; the first made it worse, and the reason is
+worth keeping.
+
+### Attempt 1 — per-detector budgets on *extremes*: much worse (0.173 → 0.027)
+
+Giving each detector `target_fpr_extremes / k` seemed right, since §8.2 cares
+most about crying wolf on real episodes. It was wrong. **Extremes are only the
+top few percent of readings**, so capping false positives there leaves the
+other ~95% completely unconstrained — and `val_fpr_extremes` deliberately
+picks the *lowest* threshold meeting its constraint, maximising recall. Four
+detectors each at their loosest permissible setting flagged almost everything:
+recall rose to 0.597 and precision fell to **0.027**.
+
+Subtype recall was excellent at that setting (drift 0.273, above entry 8's raw
+ceiling of 0.149; stuck-at 0.608), which was the first hint that the detectors
+were fine and only the operating point was wrong.
+
+### Attempt 2 — budget on *all* trustworthy readings: this is the fix
+
+`val_fpr_overall` caps false positives across every trustworthy reading, which
+is what actually controls precision. At h=1 against rung 5:
+
+| variant | recall | precision | F1 | AUC-PR | fpr_ext |
+|---|---|---|---|---|---|
+| rung 5 (FedAvg) | 0.202 | **0.722** | 0.314 | 0.311 | **0.024** |
+| rung 6, max-threshold | 0.433 | 0.173 | 0.240 | 0.312 | 0.190 |
+| rung 6, per-det on extremes | 0.597 | 0.027 | 0.051 | 0.258 | 0.134 |
+| **rung 6, per-det on overall** | 0.319 | 0.322 | **0.322** | **0.322** | 0.071 |
+
+### Attempt 3 — sweeping the budget, now free
+
+Per-detector scores are persisted into `records.parquet` (`det_*` columns), so
+the budget can be swept offline in seconds instead of a ~25-minute retrain
+each. h=1, median across stations:
+
+| budget | recall | precision | F1 | fpr_ext | drift | bias | stuck-at |
+|---|---|---|---|---|---|---|---|
+| **0.005** | 0.319 | **0.480** | **0.396** | 0.104 | 0.000 | 0.006 | 0.136 |
+| 0.01 | 0.368 | 0.336 | 0.351 | 0.143 | 0.003 | 0.029 | 0.138 |
+| 0.02 | 0.390 | 0.245 | 0.296 | 0.218 | 0.013 | 0.063 | 0.178 |
+| 0.05 | 0.450 | 0.140 | 0.214 | 0.343 | 0.049 | 0.181 | 0.211 |
+| 0.10 | 0.478 | 0.098 | 0.160 | 0.458 | 0.080 | 0.312 | 0.232 |
+| 0.20 | 0.561 | 0.066 | 0.117 | 0.619 | 0.143 | 0.471 | 0.327 |
+| 0.40 | 0.694 | 0.049 | 0.091 | 0.758 | **0.257** | **0.747** | 0.416 |
+
+**F1 falls monotonically as the budget loosens**, so 0.005 is the default.
+
+### Correction: the sweep is approximate, and the real run disagrees in detail
+
+The sweep reuses the stored standardised scores with a fixed cut at zero, while
+a real run re-fits each detector's scale and threshold per station *and per
+horizon*. Running at 0.005 properly gives F1 **0.299** at h=1, not the 0.396 the
+sweep projected. The sweep is a good guide to the *shape* of the curve and a
+poor one for absolute values; quote the run, not the sweep.
+
+Authoritative, `outputs/phase2_rung6_tuned/`:
+
+| model | h | recall | precision | F1 | AUC-PR | fpr_ext |
+|---|---|---|---|---|---|---|
+| rung 5 | 1 | 0.202 | **0.722** | **0.314** | **0.311** | 0.024 |
+| **rung 6 tuned** | 1 | 0.197 | 0.488 | 0.299 | 0.255 | **0.000** |
+| rung 5 | 3 | 0.234 | **0.682** | 0.344 | 0.346 | **0.150** |
+| **rung 6 tuned** | 3 | **0.276** | 0.527 | **0.385** | **0.384** | 0.150 |
+| rung 5 | 6 | 0.215 | **0.692** | 0.341 | 0.339 | **0.188** |
+| **rung 6 tuned** | 6 | **0.280** | 0.463 | **0.369** | **0.357** | 0.203 |
+
+So rung 6 at the tight budget **beats rung 5 at 3h and 6h** on both F1 and
+AUC-PR — the horizons where forecasting is hardest and the residual detector is
+weakest — and is a shade behind at 1h, where it achieves `fpr_on_extremes` of
+**0.000**. Subtype recall at h=1 becomes stuck-at 0.134 (from 0.000), dropout
+0.090 (from 0.007), with drift and bias back at 0.000.
+
+That last point is the trade-off in one line: **the tight budget buys aggregate
+quality and gives up drift and bias entirely.**
+
+### The finding underneath the curve
+
+**The persistent faults are detectable, but only at very low precision.** Drift
+goes from 0.000 to 0.257 across the sweep — exceeding the raw-neighbour ceiling
+— but reaching it costs a precision of 0.049. That is not a tuning failure, it
+is the shape of the problem: drift's per-hour signal sits inside the normal
+spread (entry 7), so any threshold that catches it also catches a great deal of
+ordinary variation.
+
+Which suggests the operating point should not be one number, because the
+*response* differs by fault type:
+
+- **Spike, noise, dropout** — worth alerting on in real time, so precision
+  matters and a tight budget is right.
+- **Drift, bias** — these are calibration problems, not incidents. Nobody needs
+  a 3am page; they need a monthly maintenance queue. A review queue with 1-in-20
+  precision is perfectly workable when the check is cheap and the alternative is
+  months of quietly wrong data.
+
+So the honest recommendation is **two operating points, not one**: a tight
+budget for alerting, and a loose one feeding a periodic calibration review. The
+config ships the tight setting; the sweep above is how to pick the other.
+
+### Also fixed
+
+A real bug the new tests caught: a detector that produced nothing — `spatial`,
+on any rung without a server GNN — was counted as active and took a share of
+the budget, because `normalise` returned zeros for an all-NaN input, making an
+absent detector look like a live one sitting exactly at its threshold. It now
+returns NaN, and usability is judged on the raw detector outputs.
