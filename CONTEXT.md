@@ -1314,3 +1314,86 @@ The curve, not a single number, is the finding.
 
 All six rungs of §8.1 are built and reported on real EEA data with rate-matched
 synthetic faults. Phase 2 is done.
+
+---
+
+## [2026-10-12] entry 13 — closing the split-learning loop: a small gain at an enormous price
+
+§7.2 says "Embeddings sent back down to each station", and that half had never
+been built: rung 6 computed embeddings for its decision layer but shared rung
+5's forecaster exactly, so their RMSE was identical by construction. Rung 4
+showed roughly 7% sitting in that gap. `run_split_learning` now implements the
+full §7.3 round — weights up, hidden states up, aggregate, server GNN pass,
+**embeddings down** — and the node fuses them into its encoder state before
+decoding, through a layer initialised to an exact no-op so it has to earn any
+use of them.
+
+### Forecasting: the gain is real and tiny
+
+| model | 1h | 3h | 6h |
+|---|---|---|---|
+| 5 FedAvg GRU | 15.10 | 19.38 | 20.69 |
+| **6 proposed + split learning** | **15.01** | **19.25** | **20.58** |
+| 4 centralised ST-GNN (ceiling) | 14.62 | 18.10 | 19.21 |
+
+0.6% / 0.7% / 0.5% better than rung 5 — which closes only **19% / 10% / 7%**
+of the distance to the no-privacy ceiling. The embedding feedback works, in
+the sense that it moves the number in the right direction every time. It does
+not come close to recovering what centralised access buys.
+
+### Communication: 146× for that
+
+| | rung 5 | rung 6 + split learning |
+|---|---|---|
+| per round | 1.60 MB | **216.47 MB** |
+| total | 22.3 MB | **3,247 MB** |
+| rounds to convergence | 6 | 7 |
+
+Per-window hidden states for train, validation and test, every round, across
+seven stations. **3.2 GB of traffic to buy 0.6% RMSE** is not a trade any real
+deployment makes, and saying so is more useful than reporting the improvement
+alone.
+
+### Where it does pay: 1h detection
+
+| model | h=1 F1 | h=1 AUC-PR |
+|---|---|---|
+| 6 proposed | 0.299 | 0.255 |
+| **6 proposed + split learning** | **0.358** | **0.350** |
+
+A 20% relative F1 gain and a 37% AUC-PR gain at the shortest horizon, where
+rung 6 had been its weakest and was previously behind rung 5. At 3h and 6h the
+two are level. Subtype recall is essentially unchanged (stuck-at 0.134,
+dropout 0.090), with small gains on noise and spike.
+
+So the embedding is more useful as *context for deciding* than as *context for
+forecasting* — consistent with everything since entry 7, where the limiting
+factor was never forecast quality.
+
+### What this says about the design
+
+The honest conclusion is that **per-window embedding feedback is the wrong
+granularity**. The spatial signal that matters is slow — neighbourhood
+agreement over hours and days (entries 8, 11) — so shipping a 64-dim vector for
+every hour of every split, every round, pays for temporal resolution the
+decision layer then averages away.
+
+Cheaper designs that should capture most of the same value:
+
+1. **Send embeddings for the validation and test splits only** — training
+   needs them only if the node is to *learn* from them, and the forecasting
+   gain above says that is barely worth anything. This alone would cut traffic
+   by roughly two-thirds.
+2. **Coarsen the time axis** — one embedding per day rather than per window,
+   matching the timescale the decision layer actually uses.
+3. **Keep rung 6 without split learning** for the 3h/6h horizons, where it is
+   already the best model on F1 and AUC-PR at 52.6 MB total.
+
+### Simplification, restated
+
+Gradients do not cross the server boundary. CNFGNN (Meng et al. 2021)
+backpropagates through the server GNN into the node encoders; here the GNN
+trains on its own reconstruction objective and the node treats the embedding
+as a fixed input. A gradient-coupled version might extract more from the same
+traffic — that is untested, and it is the most promising thing left in the
+architecture.
