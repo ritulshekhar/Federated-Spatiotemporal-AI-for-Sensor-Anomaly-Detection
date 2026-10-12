@@ -36,7 +36,9 @@ import numpy as np
 import pandas as pd
 
 from src.data.harmonize import load_harmonized
-from src.preprocessing.fault_labels import inject_faults, measured_rate_from
+from src.preprocessing.fault_labels import (
+    DRIFT_SIGMA_PER_72H, inject_faults, measured_rate_from,
+)
 from src.preprocessing.features import build_features
 from src.preprocessing.imputation import impute_frame
 from src.preprocessing.indexing import IMPUTED_SUFFIX, build_station_frame
@@ -132,10 +134,14 @@ def process_station(
                 "(§2.7/§5.5) — an arbitrary default lets the model learn "
                 "'region -> fault likelihood' as a shortcut."
             )
+        inj = pre.get("fault_injection", {})
         frame, rep = inject_faults(
             frame, target, target_rate=synthetic_rate,
             # Train stays clean (§6.7). Only val and test receive faults.
             eligible_after=boundaries.train_end,
+            drift_sigma_per_72h=tuple(
+                inj.get("drift_sigma_per_72h", DRIFT_SIGMA_PER_72H)
+            ),
         )
         injection = rep.as_dict()
 

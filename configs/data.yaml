@@ -190,6 +190,21 @@ preprocessing:
     horizons_reported: [1, 3, 6]
     split: {train: 0.70, val: 0.15, test: 0.15}
 
+  fault_injection:               # §6.7 / §2.1a
+    # Drift is injected by *rate*, in standard deviations per 72 hours, not as a
+    # fixed total per episode. CONTEXT.md entry 17 measured working co-located
+    # sensors drifting about 0.01 sigma/72h, so the original fixed 0.8-2.5 sigma
+    # total was roughly a hundred times too fast, and made long episodes drift
+    # more slowly than short ones.
+    #
+    # The range runs from that measured rate to an obviously broken instrument,
+    # and is sampled LOG-uniformly so both decades are equally represented —
+    # recall is then reported as a function of the rate rather than as one
+    # number for "drift". The measured value bounds HEALTHY sensors (CAPTOR
+    # contains no failed instrument), so it is a floor on realism, not a claim
+    # about how fast faulty hardware drifts.
+    drift_sigma_per_72h: [0.01, 2.0]
+
   quality:
     # Minimum fraction of the target series that must be genuinely observed
     # (not imputed) for a station to enter the node set at all.

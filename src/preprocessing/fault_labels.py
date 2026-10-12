@@ -57,6 +57,12 @@ _DURATION_HOURS: dict[str, tuple[int, int]] = {
     "bias": (12, 96),
 }
 
+#: Drift rate range, in standard deviations per 72 hours, sampled log-uniformly
+#: (see `_apply_fault`). The low end is the ~0.01 sigma/72h measured on working
+#: co-located sensors (CONTEXT.md entry 17); the high end is an obviously broken
+#: instrument. Two decades, so each is equally represented.
+DRIFT_SIGMA_PER_72H: tuple[float, float] = (0.01, 2.0)
+
 
 @dataclass
 class InjectionReport:
@@ -70,6 +76,11 @@ class InjectionReport:
     duration_source: str = "type_defaults"
     n_real_episodes: int = 0
     median_real_duration_h: float = float("nan")
+    # Carried so a saved report says which drift rate produced it — the range
+    # was corrected once already (see `_apply_fault`) and old reports would
+    # otherwise be indistinguishable from new ones.
+    drift_sigma_lo: float = DRIFT_SIGMA_PER_72H[0]
+    drift_sigma_hi: float = DRIFT_SIGMA_PER_72H[1]
     by_type: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -122,6 +133,7 @@ def inject_faults(
     max_attempts_factor: int = 8,
     use_real_durations: bool = True,
     eligible_after: pd.Timestamp | None = None,
+    drift_sigma_per_72h: tuple[float, float] = DRIFT_SIGMA_PER_72H,
 ) -> tuple[pd.DataFrame, InjectionReport]:
     """Inject rate-matched synthetic faults into ``pollutant``, in place on a copy.
 
@@ -139,6 +151,13 @@ def inject_faults(
     unknown = set(types) - set(FAULT_TYPES)
     if unknown:
         raise ValueError(f"unknown fault type(s): {sorted(unknown)}")
+    lo_rate, hi_rate = (float(x) for x in drift_sigma_per_72h)
+    if not 0.0 < lo_rate <= hi_rate:
+        raise ValueError(
+            f"drift_sigma_per_72h={drift_sigma_per_72h!r} must be an increasing "
+            "pair of positive rates in sigma per 72 hours"
+        )
+    drift_sigma_per_72h = (lo_rate, hi_rate)
 
     frame = frame.copy()
     station_id = frame.attrs.get("station_id", "?")
@@ -218,7 +237,10 @@ def inject_faults(
             if not eligible[span].all() or injected[span].any():
                 continue
 
-            values[span] = _apply_fault(kind, values[span], values, eligible, rng)
+            values[span] = _apply_fault(
+                kind, values[span], values, eligible, rng,
+                drift_sigma_per_72h=drift_sigma_per_72h,
+            )
             injected[span] = True
             fault_type[span] = kind
             by_type[kind] += duration
@@ -248,6 +270,7 @@ def inject_faults(
         n_real_episodes=int(real_durations.size),
         median_real_duration_h=(float(np.median(real_durations))
                                 if real_durations.size else float("nan")),
+        drift_sigma_lo=lo_rate, drift_sigma_hi=hi_rate,
         by_type=by_type,
     )
     log.info(
@@ -262,7 +285,9 @@ def inject_faults(
 
 # ---------------------------------------------------------------------------
 def _apply_fault(kind: str, segment: np.ndarray, full: np.ndarray,
-                 eligible: np.ndarray, rng) -> np.ndarray:
+                 eligible: np.ndarray, rng, *,
+                 drift_sigma_per_72h: tuple[float, float] = DRIFT_SIGMA_PER_72H,
+                 ) -> np.ndarray:
     """One fault signature, applied to a contiguous segment."""
     seg = segment.copy()
     k = len(seg)
@@ -274,9 +299,32 @@ def _apply_fault(kind: str, segment: np.ndarray, full: np.ndarray,
         return np.full(k, seg[0])
 
     if kind == "drift":
-        # Slow linear calibration drift. The subtype Validity cannot express,
-        # and the one a residual-threshold detector is worst at.
-        magnitude = rng.uniform(0.8, 2.5) * scale * rng.choice([-1.0, 1.0])
+        # Slow linear calibration drift: the subtype Validity cannot express,
+        # and the one a residual threshold is worst at.
+        #
+        # Parameterised by *rate*, not by total magnitude, and this is a
+        # correction. The original drew a fixed 0.8-2.5 sigma total regardless
+        # of episode length, which for a 72h episode is a drift rate roughly
+        # thirty times faster than anything real: entry 17 measured working
+        # co-located sensors drifting about 0.01 sigma per 72 hours. A fixed
+        # total also made a long episode drift *more slowly* than a short one,
+        # which is backwards.
+        #
+        # The rate is drawn **log-uniformly** across the configured range,
+        # which spans the measured healthy rate at the bottom to an obviously
+        # broken instrument at the top. Log-uniform matters: sampling uniformly
+        # over [0.01, 2.0] would put half the episodes above 1 sigma/72h and
+        # almost none in the slow regime that is the whole difficulty, so the
+        # per-magnitude recall table (`evaluation/magnitude.py`) would have
+        # nothing to say about exactly the band we cannot currently detect.
+        # Equal mass per decade instead.
+        #
+        # The measured rate bounds *healthy* sensors — the CAPTOR deployment
+        # contains no failed instrument — so the low end is a floor on realism,
+        # not a claim about how fast a faulty sensor drifts.
+        lo, hi = drift_sigma_per_72h
+        rate = float(np.exp(rng.uniform(np.log(lo), np.log(hi))))   # sigma/72h
+        magnitude = rate * (k / 72.0) * scale * rng.choice([-1.0, 1.0])
         return seg + np.linspace(0.0, magnitude, k)
 
     if kind == "spike":

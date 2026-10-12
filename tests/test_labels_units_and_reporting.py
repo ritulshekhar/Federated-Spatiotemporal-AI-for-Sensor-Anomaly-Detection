@@ -16,7 +16,7 @@ from src.data.harmonize import (
 from src.evaluation.metrics import anomaly_metrics, extreme_mask, forecast_metrics
 from src.evaluation.report import PoolingError, anomaly_table, forecast_table
 from src.preprocessing.fault_labels import (
-    SYNTHETIC_LABEL_COL_SUFFIX, inject_faults, measured_rate_from,
+    SYNTHETIC_LABEL_COL_SUFFIX, _apply_fault, inject_faults, measured_rate_from,
 )
 from src.preprocessing.indexing import IMPUTED_SUFFIX, LABEL_SUFFIX
 
@@ -110,6 +110,76 @@ def test_injection_never_touches_real_faults_or_imputed_points():
 def test_measured_rate_from_refuses_an_empty_series():
     with pytest.raises(ValueError, match="arbitrary default"):
         measured_rate_from(pd.Series([], dtype=object))
+
+
+@pytest.mark.parametrize("bad", [(0.0, 1.0), (-1.0, 1.0), (2.0, 0.5)])
+def test_injection_rejects_impossible_drift_rates(bad):
+    with pytest.raises(ValueError, match="sigma per 72 hours"):
+        inject_faults(_injectable_frame(), TARGET, target_rate=0.05,
+                      drift_sigma_per_72h=bad)
+
+
+def test_drift_is_injected_at_a_rate_not_a_fixed_total():
+    """Drift magnitude must scale with episode length, and stay in its range.
+
+    The original injector drew a fixed 0.8-2.5 sigma total regardless of
+    duration, which made a long episode drift *more slowly* than a short one
+    and put every episode far above the ~0.01 sigma/72h that CONTEXT.md entry
+    17 measured on working sensors.
+    """
+    rate_hi = 0.4
+    frame = _injectable_frame(n=20_000)
+    out, rep = inject_faults(frame, TARGET, target_rate=0.08, seed=11,
+                             drift_sigma_per_72h=(0.2, rate_hi))
+
+    assert (rep.drift_sigma_lo, rep.drift_sigma_hi) == (0.2, rate_hi)
+
+    kind = out[TARGET + "__synthetic_fault_type"].to_numpy()
+    scale = float(np.nanstd(frame[TARGET].to_numpy()))
+    delta = out[TARGET].to_numpy() - frame[TARGET].to_numpy()
+
+    # Episodes are contiguous runs of the same subtype.
+    is_drift = kind == "drift"
+    assert is_drift.any(), "no drift episode was injected"
+    edges = np.flatnonzero(np.diff(np.r_[False, is_drift, False].astype(int)))
+    for start, stop in zip(edges[0::2], edges[1::2]):
+        hours = stop - start
+        observed = abs(delta[stop - 1]) / scale            # sigma, end of ramp
+        assert observed <= rate_hi * (hours / 72.0) + 1e-6, (
+            f"a {hours}h drift episode moved {observed:.3f} sigma, faster than "
+            f"the configured ceiling of {rate_hi} sigma/72h"
+        )
+
+
+def test_drift_rates_are_spread_log_uniformly_over_the_range():
+    """The slow decade must actually be sampled.
+
+    Uniform sampling over [0.01, 2.0] would put half the episodes above
+    1 sigma/72h and essentially none near the measured real rate, leaving the
+    per-magnitude recall table with nothing to say about the band the detector
+    cannot currently reach.
+    """
+    rng = np.random.default_rng(0)
+    scale, hours = 10.0, 72
+    seg = np.full(hours, 50.0)
+    full, eligible = np.full(4000, 50.0), np.ones(4000, dtype=bool)
+    full[:2] = [50.0 - scale, 50.0 + scale]      # give nanstd something to see
+
+    rates = []
+    for _ in range(400):
+        out = _apply_fault("drift", seg, full, eligible, rng,
+                           drift_sigma_per_72h=(0.01, 2.0))
+        rates.append(abs(out[-1] - out[0]) / float(np.nanstd(full[eligible])))
+
+    rates = np.array(rates)
+    assert rates.min() >= 0.01 * 0.9 and rates.max() <= 2.0 * 1.1
+    # Log-uniform over two decades puts ~half the mass below the geometric
+    # mean (0.141); uniform would put ~7% there.
+    below_geometric_mean = float((rates < np.sqrt(0.01 * 2.0)).mean())
+    assert 0.35 < below_geometric_mean < 0.65, (
+        f"{below_geometric_mean:.2f} of drift rates fell in the slow decade — "
+        "the rate does not look log-uniform"
+    )
 
 
 # ---------------------------------------------------------------------------
