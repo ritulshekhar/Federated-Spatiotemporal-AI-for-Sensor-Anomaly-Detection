@@ -62,6 +62,23 @@ eea:
 # ---------------------------------------------------------------------------
 # Node set: 10 Barcelona city stations (CLAUDE.md §3.1)
 # ---------------------------------------------------------------------------
+# How the node set is chosen.
+#   explicit — the hand-written `stations:` list below. Right for a small,
+#              deliberately curated set.
+#   registry — selected from the EEA registry by province and pollutant. Right
+#              for the §3.1 scale-up, where hand-listing stops being sensible.
+#              Catalonia is provinces 08/17/25/43; 71 stations report NO2.
+#
+# Entry 16 measured why this matters: with 7 stations, resampling stations
+# widens every subtype interval past zero, so nothing generalises. More nodes
+# is the only fix.
+station_selection:
+  mode: explicit            # explicit | registry
+  registry:
+    provinces: ["08", "17", "25", "43"]
+    require_pollutant: NO2
+    max_stations: null
+
 # VERIFIED 2026-09-16 against data/raw/eea_station_metadata.csv. All ten EoI
 # codes exist in the EEA registry; every station_class below is now the
 # registry's own area x type, not a guess. Several of the original guesses were

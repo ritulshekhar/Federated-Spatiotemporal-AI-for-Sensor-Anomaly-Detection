@@ -149,11 +149,73 @@ def classify(area: object, stype: object) -> str:
 # ---------------------------------------------------------------------------
 # The configured node set
 # ---------------------------------------------------------------------------
+def stations_from_registry(provinces: list[str], require_pollutant: str | None = None,
+                           country: str = "ES", max_stations: int | None = None
+                           ) -> list[dict]:
+    """Build a node set from the registry instead of hand-listing it.
+
+    Hand-listing stops being reasonable past a dozen stations, and §3.1's
+    scale-up path goes to 129. Provinces are the first two digits of the
+    Spanish national station code — Catalonia is 08 (Barcelona), 17 (Girona),
+    25 (Lleida), 43 (Tarragona). Note this is *not* the same as EEA's "city"
+    filter, which only recognises large urban areas.
+    """
+    reg = load_registry(country=country)
+    reg = reg.copy()
+    reg["_prov"] = reg["AirQualityStationNatCode"].astype(str).str.zfill(8).str[:2]
+    sel = reg[reg["_prov"].isin([str(p).zfill(2) for p in provinces])]
+
+    if require_pollutant:
+        code = {v: k for k, v in POLLUTANT_BY_CODE_LOCAL.items()}.get(require_pollutant)
+        if code is None:
+            raise ValueError(f"unknown pollutant {require_pollutant!r}")
+        pol = (sel["AirPollutantCode"].astype(str)
+               .str.extract(r"(\d+)$", expand=False).astype("Float64"))
+        sel = sel[pol == code]
+
+    sel = sel.dropna(subset=["Latitude", "Longitude"])
+    sel = sel.drop_duplicates(subset=["AirQualityStationEoICode"])
+    sel = sel.sort_values("AirQualityStationEoICode")
+    if max_stations:
+        sel = sel.head(int(max_stations))
+
+    out = [
+        {
+            "eoi_code": str(r["AirQualityStationEoICode"]),
+            "name": str(r["AirQualityStationEoICode"]),   # registry has no names
+            "station_class": classify(r.get("AirQualityStationArea"),
+                                      r.get("AirQualityStationType")),
+        }
+        for _, r in sel.iterrows()
+    ]
+    log.info("registry selection: %d station(s) in provinces %s%s",
+             len(out), provinces,
+             f" reporting {require_pollutant}" if require_pollutant else "")
+    return out
+
+
+#: Local copy so this module does not import from fetch_eea (which imports this one).
+POLLUTANT_BY_CODE_LOCAL: dict[int, str] = {
+    1: "SO2", 5: "PM10", 6001: "PM2.5", 7: "O3", 8: "NO2", 10: "CO",
+}
+
+
 def configured_stations() -> list[Station]:
     """The node set from configs/data.yaml, enriched from the registry if present."""
     cfg = load_config("data")
     region = cfg["eea"]["region"]
-    entries = cfg["stations"]
+
+    selection = cfg.get("station_selection", {})
+    if selection.get("mode") == "registry":
+        rcfg = selection.get("registry", {})
+        entries = stations_from_registry(
+            provinces=rcfg.get("provinces", []),
+            require_pollutant=rcfg.get("require_pollutant"),
+            country=cfg["eea"]["country"],
+            max_stations=rcfg.get("max_stations"),
+        )
+    else:
+        entries = cfg["stations"]
 
     enrich: dict[str, dict] = {}
     try:
