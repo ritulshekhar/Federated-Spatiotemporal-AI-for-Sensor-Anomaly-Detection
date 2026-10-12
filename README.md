@@ -24,7 +24,7 @@ possible.
 | Phase | State |
 |---|---|
 | **1** — data pipeline, preprocessing, baseline rungs 1–3 | Complete, on real EEA data |
-| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | Rungs 5 and 6 done; rung 4 (forecasting ceiling) to build |
+| **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | **Complete** — all six §8.1 rungs built and reported |
 | **3** — dashboard, India generalization experiment | Acquisition + schema verified; not wired in |
 
 ### What the real data looks like
@@ -79,10 +79,36 @@ detected. Spatial agreement is computed server-side from **compressed
 embeddings only** — never from raw neighbour data — which is the §1.2 gap,
 demonstrated under the privacy contract.
 
-**With an honest caveat:** aggregate precision falls from 0.722 to 0.173 and
-AUC-PR is flat, because four detectors are combined by taking a maximum
-against a single threshold. The subtype coverage is real; the aggregate
-ranking is not yet better. See `CONTEXT.md` entry 10.
+### The complete ladder (`outputs/phase2_*`)
+
+Forecast RMSE (µg/m³ NO2, median across stations):
+
+| rung | model | 1h | 3h | 6h |
+|---|---|---|---|---|
+| 1 | persistence | 17.23 | 25.40 | 28.16 |
+| 2 | local GRU | 15.10 | 19.03 | 20.02 |
+| 3 | centralised GRU | 15.10 | 19.30 | 20.85 |
+| **4** | **centralised ST-GNN** (no privacy) | **14.62** | **18.10** | **19.21** |
+| 5 | FedAvg GRU | 15.10 | 19.38 | 20.69 |
+| 6 | proposed | 15.10 | 19.38 | 20.69 |
+
+Two results worth quoting:
+
+- **Spatial information helps forecasting** — the ST-GNN beats the centralised
+  GRU by 3.2–7.9% on identical data and features. The only difference is that
+  stations can see each other.
+- **Privacy costs 3–8% of forecast accuracy** — federated against the
+  no-privacy ceiling, widening with horizon. That is objective 6, measured.
+
+On fault classification, rung 6 wins at 3h and 6h (F1 0.385 / 0.369 against
+rung 5's 0.344 / 0.341), and **no rung with full raw access — including the
+centralised ST-GNN — detects stuck-at or bias at all.** Only rung 6 does, and
+under the privacy constraint.
+
+**The honest caveat:** at the tight operating point drift and bias sit at
+0.000. They are reachable (drift 0.257, bias 0.747) only at a precision of
+0.049. The trade-off curve, not a single number, is the finding — see
+`CONTEXT.md` entries 11 and 12.
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 

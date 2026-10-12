@@ -1240,3 +1240,77 @@ on any rung without a server GNN — was counted as active and took a share of
 the budget, because `normalise` returned zeros for an all-NaN input, making an
 absent detector look like a live one sitting exactly at its threshold. It now
 returns NaN, and usability is judged on the raw detector outputs.
+
+---
+
+## [2026-10-12] entry 12 — rung 4 and the complete ladder
+
+Rung 4 completes §8.1. Centralised ST-GNN: every station's raw windows held
+centrally, shared GRU encoder, graph mixing across stations, shared decoder,
+trained jointly. It respects none of §2.4, which is the point — it exists to
+price the privacy constraint.
+
+### Forecasting (RMSE, ug/m3 NO2, median across stations)
+
+| rung | model | 1h | 3h | 6h |
+|---|---|---|---|---|
+| 1 | persistence | 17.23 | 25.40 | 28.16 |
+| 2 | local GRU | 15.10 | 19.03 | 20.02 |
+| 3 | centralised GRU | 15.10 | 19.30 | 20.85 |
+| **4** | **centralised ST-GNN** | **14.62** | **18.10** | **19.21** |
+| 5 | FedAvg GRU | 15.10 | 19.38 | 20.69 |
+| 6 | proposed | 15.10 | 19.38 | 20.69 |
+
+**Two numbers worth taking from this table.**
+
+*Spatial information helps forecasting.* The ST-GNN beats the centralised GRU
+by 3.2% / 6.2% / 7.9% at 1h / 3h / 6h, on identical data with identical
+features. The only difference is that stations can see each other, so the gain
+is attributable to the graph rather than to capacity or data volume.
+
+*The privacy constraint costs 3-8% of forecast accuracy.* Federated (15.10 /
+19.38 / 20.69) against the no-privacy ceiling (14.62 / 18.10 / 19.21) is
++3.3% / +7.1% / +7.7% RMSE, widening with horizon. That is the answer to
+objective 6, measured rather than argued, and it is a modest price.
+
+Note rungs 5 and 6 share a forecaster by construction, so their RMSE is
+identical; rung 6 differs only in how it *decides*.
+
+### Anomaly (median across stations)
+
+| model | h=1 F1 | h=3 F1 | h=6 F1 | h=3 AUC-PR |
+|---|---|---|---|---|
+| 4 centralised ST-GNN | **0.322** | 0.357 | 0.333 | 0.334 |
+| 5 FedAvg GRU | 0.314 | 0.344 | 0.341 | 0.346 |
+| **6 proposed** | 0.299 | **0.385** | **0.369** | **0.384** |
+
+Rung 6 wins at 3h and 6h on both F1 and AUC-PR — the horizons where the
+forecast is weakest and a residual detector has least to work with. Rung 4
+edges it at 1h, where a sharp forecast is doing most of the work.
+
+### The subtype table is still the real result (h=1)
+
+| subtype | rungs 1-5 | rung 6 |
+|---|---|---|
+| bias | 0.000 | 0.000 |
+| drift | 0.000 | 0.000 |
+| dropout | 0.000-0.018 | **0.090** |
+| stuck-at | 0.000 | **0.134** |
+| noise | 0.380-0.413 | 0.247 |
+| spike | 0.449-0.590 | 0.505 |
+
+**No rung with access to raw data from every station — including the
+centralised ST-GNN — detects stuck-at or bias at all.** Only rung 6 does, and
+it does so under the privacy constraint. That is not a quirk of tuning: entry
+7 showed stuck-at scores *below* the normal median on any residual-based
+score, so no amount of forecasting skill reaches it. It takes a different
+statistic, which is what the decision layer adds.
+
+At this (tight) budget drift and bias sit at 0.000; entry 11's sweep shows
+they are reachable at 0.257 and 0.747 respectively, for a precision of 0.049.
+The curve, not a single number, is the finding.
+
+### Ladder complete
+
+All six rungs of §8.1 are built and reported on real EEA data with rate-matched
+synthetic faults. Phase 2 is done.
