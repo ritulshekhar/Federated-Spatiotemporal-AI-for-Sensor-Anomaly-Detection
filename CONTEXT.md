@@ -1559,3 +1559,75 @@ A general lesson worth carrying: under a shared false-positive budget, adding a
 detector is never free. Each new one must earn more than the 1/k tightening it
 imposes on every existing detector. The CUSUM does not, at this operating
 point, against this mix of faults.
+
+---
+
+## [2026-10-12] entry 16 — confidence intervals: what actually survives resampling
+
+Every number so far came from one test window with no error bar.
+`src/evaluation/uncertainty.py` adds a moving-block bootstrap (one-week blocks,
+to keep fault episodes intact) with two resampling levels — time only, and
+stations plus time — and a **paired** comparison, since the models are scored on
+the same hours and their errors are correlated.
+
+### Aggregate: rung 6 vs rung 5 is not a real difference
+
+h=3, 300 replicates, stations + time:
+
+| metric | rung 5 | rung 6 | difference | 95% interval |
+|---|---|---|---|---|
+| F1 | 0.351 | 0.355 | +0.006 | [-0.102, 0.113] |
+| AUC-PR | 0.337 | 0.349 | +0.016 | [-0.099, 0.126] |
+| recall | 0.239 | 0.284 | +0.041 | [-0.071, 0.151] |
+| precision | 0.691 | 0.523 | **-0.166** | [-0.348, 0.014] |
+| fpr_extremes | 0.147 | 0.107 | -0.039 | [-0.114, 0.031] |
+
+**None of it is significant.** The headline "rung 6 wins at 3h on F1" from
+entry 12 does not survive: the difference is +0.006 against an interval eleven
+times wider. The precision *loss* is the closest to real (rung 6 is worse in
+95.3% of replicates) and even that includes zero.
+
+### Per subtype, the picture splits in a useful way
+
+| subtype | difference | time only | stations + time |
+|---|---|---|---|
+| stuck-at | +0.236 / +0.211 | **[0.012, 0.382] ✓** | [0.000, 0.464] ✗ |
+| dropout | +0.127 / +0.117 | **[0.016, 0.221] ✓** | [-0.005, 0.278] ✗ |
+| noise | −0.125 / −0.121 | **[-0.203, -0.045] ✓** | [-0.243, 0.010] ✗ |
+| spike | −0.055 / −0.050 | [-0.134, 0.024] ✗ | [-0.150, 0.040] ✗ |
+| drift, bias | 0.000 | — | — |
+
+Read the two columns against each other, because the difference between them
+*is* the finding:
+
+**Resampling time only** — would a different stretch of 2024 have told the same
+story about *these seven stations*? Yes. Rung 6 really does detect stuck-at and
+dropout better, and really is worse at noise. Those three effects are solid.
+
+**Resampling stations as well** — would a different seven stations have told the
+same story? **Unknown.** Every interval widens past zero. With n=7, station-to-
+station variability swamps everything.
+
+### What this means for how the results are stated
+
+The qualitative claim — rung 6 detects stuck-at where every other rung detects
+none — is **demonstrated on this node set** and **not yet established as
+general**. Both halves of that sentence are load-bearing, and earlier entries
+(10, 12) stated the first without the second.
+
+It also makes the noise regression real rather than noise: rung 6 is genuinely
+worse at detecting noise faults, by 0.125, and that cost has to be reported
+alongside the stuck-at gain.
+
+And it raises the priority of scaling the node set. Seven stations is not a
+limitation of convenience; it is the reason none of these effects can be
+generalised. Catalonia has ~129 stations, and more nodes is the only way these
+intervals close.
+
+### Note on what was not corrected
+
+Nothing earlier was wrong about the *point estimates* — those numbers are what
+the single test window gave. What was missing is that most of the gaps between
+rungs are smaller than the uncertainty around them. The subtype claims survive
+better than the aggregate ones, which is a reversal of how they were originally
+emphasised.

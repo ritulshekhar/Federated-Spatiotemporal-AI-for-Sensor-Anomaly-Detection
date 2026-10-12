@@ -142,7 +142,33 @@ The review tier trades precision for coverage, which is correct when an
 inspection is cheap and the alternative is months of quietly wrong data. Run
 either with `python -m src.evaluation.operating_points outputs/<run>`.
 
-See `CONTEXT.md` entries 11–14.
+### How much of this is real (block bootstrap, `CONTEXT.md` entry 16)
+
+**Aggregate differences between rungs are not statistically significant.** Rung
+6 vs rung 5 at 3h: F1 +0.006, 95% interval [-0.102, 0.113]. Quote the rungs'
+point estimates only with that caveat attached.
+
+**Per subtype, resampling time only** — i.e. "would a different stretch of 2024
+have said the same about these seven stations?" — three effects are real:
+
+| subtype | difference | 95% interval |
+|---|---|---|
+| stuck-at | **+0.236** | [0.012, 0.382] |
+| dropout | **+0.127** | [0.016, 0.221] |
+| noise | **−0.125** | [−0.203, −0.045] |
+
+**Resampling stations as well, nothing is significant.** With seven stations,
+station-to-station variability swamps every effect. So rung 6 detecting
+stuck-at where other rungs detect none is *demonstrated on this node set* and
+*not yet established as general* — and scaling to Catalonia's ~129 stations is
+the only way to close those intervals.
+
+```bash
+python -m src.evaluation.uncertainty outputs/phase2_ladder outputs/phase2_rung6_split \
+    --models 5_fedavg_gru 6_proposed --horizon 3 --compare 6_proposed 5_fedavg_gru
+```
+
+See `CONTEXT.md` entries 11–16.
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 
