@@ -790,7 +790,8 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
 def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
                out_name: str | None = None, variant: str = "",
                label_source: str = "auto",
-               score_mode: str | None = None) -> Path:
+               score_mode: str | None = None,
+               split_learning: bool | None = None) -> Path:
     """Run the Phase 1 rungs over one region and write one grouped report."""
     data_cfg = load_config("data")
     model_cfg = load_config("model")
@@ -854,10 +855,11 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
 
     if 6 in rungs:
         fed_cfg = load_config("federation")
+        use_split = (split_learning if split_learning is not None
+                     else bool(fed_cfg.get("split_learning", {}).get("enabled", False)))
         rec, thr, hist = rung6_proposed(
             stations, model_cfg, fed_cfg, seed=seed,
-            split_learning=bool(fed_cfg.get("split_learning", {}).get("enabled", False)),
-            **score_kwargs)
+            split_learning=use_split, **score_kwargs)
         all_records.append(rec)
         all_thresholds.update(thr)
         extras["rung6_history"] = hist
@@ -911,6 +913,10 @@ def main() -> None:
     ap.add_argument("--score-mode", default=None,
                     choices=["absolute", "volatility"],
                     help="anomaly score form (default: configs/model.yaml)")
+    ap.add_argument("--no-split-learning", action="store_true",
+                    help="rung 6 without the §7.2 embedding downlink. Per-window "
+                         "hidden states cost ~216 MB/round at 7 clients and scale "
+                         "with the node set, so large runs want this off.")
     args = ap.parse_args()
 
     unsupported = [r for r in args.rungs if r not in (1, 2, 3, 4, 5, 6)]
@@ -920,7 +926,8 @@ def main() -> None:
     seed_everything(load_config("model").get("seed", 1337))
     out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name,
                      variant=args.variant, label_source=args.label_source,
-                     score_mode=args.score_mode)
+                     score_mode=args.score_mode,
+                     split_learning=False if args.no_split_learning else None)
     print(f"\nreport -> {out}")
 
 

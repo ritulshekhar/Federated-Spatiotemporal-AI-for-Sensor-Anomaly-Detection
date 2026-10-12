@@ -387,6 +387,10 @@ def main() -> None:
     ap.add_argument("--demo", action="store_true",
                     help="use the SIMULATED source (region='demo', "
                          "label_source='simulated')")
+    ap.add_argument("--region-name", default=None,
+                    help="write under this region instead of eea.region — use "
+                         "for an alternative node set so an existing build is "
+                         "not overwritten (e.g. the 71-station scale-up)")
     args = ap.parse_args()
 
     cfg = load_config("data")
@@ -408,6 +412,8 @@ def main() -> None:
         raw = fetch(from_dir=args.from_dir)
         region, label_source, class_map = cfg["eea"]["region"], "real", station_class_lookup()
 
+    if args.region_name:
+        region = args.region_name
     df = harmonize_eea(raw, class_map, region=region, label_source=label_source)
 
     if not args.demo:
