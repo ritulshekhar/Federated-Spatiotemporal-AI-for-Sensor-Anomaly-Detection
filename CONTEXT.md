@@ -2119,3 +2119,57 @@ An earlier pair of jobs died simultaneously with exit code 4 and no traceback in
 either; that was an external kill at the interrupt, not a bug in either. The
 CPCB downloader's parquet cache meant the download resumed rather than
 restarting, which is exactly what that cache is for.
+
+---
+
+## [2026-10-13] entry 22 — two self-inflicted run failures worth not repeating
+
+Neither of these was a bug in the project. Both cost about an hour of compute,
+and both are the kind of mistake that is invisible until it has already wasted
+the run.
+
+### Editing source while a long job runs will kill it
+
+The 7-station ladder re-run reached rung 5 after ~50 minutes and died with:
+
+```
+ImportError: cannot import name 'LEVEL_BUCKET_NORMAL'
+             from 'src.preprocessing.normalize'
+```
+
+The symbol existed. Tests passed against it at that very moment. What happened
+is that the ladder had imported `src.preprocessing.normalize` at startup, so
+`sys.modules` held the **pre-edit** module for the life of the process. Rung 5
+imports `src.federated.client` *lazily*, at the point it is needed — and by then
+`client.py` on disk was the new version asking for a symbol that the cached
+`normalize` did not have.
+
+So the failure needed all three of: a long-running process, a lazy import, and
+an edit landing in between. Rungs 1-4 had already completed and were lost,
+because the report is only written at the end.
+
+**Rule: once a training run is launched, `src/` is frozen until it finishes.**
+Documentation and CONTEXT.md are safe — nothing imports them.
+
+### Never pipe a background job through `tail`
+
+Two jobs were relaunched as `python ... 2>&1 | tail -40`. Two separate
+consequences, both bad:
+
+1. **`tail` buffers until EOF**, so both logs sat at 0 bytes for over an hour
+   while the processes ran fine. Progress was invisible; liveness had to be
+   inferred from CPU counters.
+2. **The pipeline's exit code is `tail`'s, not Python's.** The ladder died on
+   the ImportError above and the harness reported *"completed (exit code 0)"*.
+   A failed run was announced as a success, and only reading the log revealed
+   otherwise.
+
+The second is the serious one: it means an exit status cannot be trusted at all
+through a pipe. Use no pipe, or `Tee-Object`.
+
+### And the earlier exit-code-4 pair
+
+For the record, since it now has a clean explanation: the pair of jobs that both
+died at 19:38 with exit code 4 and no traceback were killed externally at the
+user interrupt, not by any fault of their own. The CPCB downloader's parquet
+cache did its job — the completed station was not re-downloaded on resume.
