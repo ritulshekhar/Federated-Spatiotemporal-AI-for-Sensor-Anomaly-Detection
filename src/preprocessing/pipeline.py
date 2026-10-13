@@ -62,8 +62,15 @@ def process_station(
     meteo: pd.DataFrame | None = None,
     write: bool = True,
     variant: str = "",
+    borrowed_durations: "np.ndarray | None" = None,
 ) -> dict:
-    """Full §6 pipeline for one station. Returns its manifest."""
+    """Full §6 pipeline for one station. Returns its manifest.
+
+    ``borrowed_durations`` supplies a real `Validity` episode-duration
+    distribution for a region that has none of its own (§5.5's argument for the
+    rate, applied to durations). Without it an Indian build invents episode
+    lengths, which is strictly weaker evidence.
+    """
     pre = cfg["preprocessing"]
     target = pre["target_pollutant"]
     pollutants = [target] + [p for p in pre["feature_pollutants"] if p != target]
@@ -142,6 +149,7 @@ def process_station(
             drift_sigma_per_72h=tuple(
                 inj.get("drift_sigma_per_72h", DRIFT_SIGMA_PER_72H)
             ),
+            real_durations=borrowed_durations,
         )
         injection = rep.as_dict()
 
@@ -242,6 +250,54 @@ def _prune_sparse_features(frame: pd.DataFrame, present: list[str], target: str,
     return kept
 
 
+def _durations_from_reference_region(cfg: dict, ref_region: str,
+                                     pollutant: str):
+    """Real `Validity` episode durations from a reference region.
+
+    §2.1a's second LOCKED constraint is that episode durations come from the
+    real `Validity` episode-length distribution, because EEA's flags genuinely
+    record when instruments failed and for how long even though the reading
+    itself is destroyed. A region without Validity flags cannot honour that
+    from its own data, so it borrows the distribution rather than inventing
+    episode lengths — the same reasoning §5.5 applies to the rate.
+
+    Returns None on any failure, so the caller falls back to the per-type
+    ranges and warns, rather than this silently returning something empty.
+    """
+    import numpy as np
+
+    from src.preprocessing.indexing import LABEL_SUFFIX
+
+    try:
+        ref_df = load_harmonized(ref_region)
+    except Exception as exc:  # noqa: BLE001 — absence is a normal outcome
+        log.warning("cannot borrow episode durations from %r: %s", ref_region, exc)
+        return None
+
+    ref_df = ref_df[(ref_df["pollutant"] == pollutant)
+                    & (ref_df["label_source"] == "real")]
+    if ref_df.empty:
+        return None
+
+    runs = []
+    for _, g in ref_df.groupby("station_id", observed=True):
+        g = g.sort_values("timestamp_utc")
+        is_fault = (g["label"] == "fault").to_numpy()
+        if not is_fault.any():
+            continue
+        padded = np.concatenate(([False], is_fault, [False]))
+        edges = np.flatnonzero(padded[1:] != padded[:-1])
+        runs.append((edges[1::2] - edges[0::2]).astype(int))
+    if not runs:
+        return None
+
+    durations = np.concatenate(runs)
+    log.info("borrowed %d real %s fault-episode duration(s) from region %r "
+             "(median %.0fh, max %dh) — §2.1a", len(durations), pollutant,
+             ref_region, float(np.median(durations)), int(durations.max()))
+    return durations
+
+
 def _rate_from_reference_region(cfg: dict, region: str) -> tuple[float, str] | None:
     """The EEA-measured fault rate, for a region that has no real labels.
 
@@ -290,6 +346,8 @@ def run(region: str, inject_synthetic: bool = False,
     # §5.5 — the rate synthetic injection must match, measured once, from
     # REAL-labelled rows only, across the region.
     synthetic_rate = None
+    borrowed_durations = None
+    pre_target = cfg["preprocessing"]["target_pollutant"]
     if inject_synthetic:
         real_rows = long_df[long_df["label_source"] == "real"]
         source = "real"
@@ -303,6 +361,13 @@ def run(region: str, inject_synthetic: bool = False,
             borrowed = _rate_from_reference_region(cfg, region)
             if borrowed is not None:
                 synthetic_rate, ref_region = borrowed
+                # §2.1a wants episode durations drawn from real operator-recorded
+                # instrument failures. India has no Validity flags, so borrow
+                # that distribution from the same reference region the rate came
+                # from — inventing episode lengths is strictly weaker evidence,
+                # and the alternative here is not "measure it" but "make it up".
+                borrowed_durations = _durations_from_reference_region(
+                    cfg, ref_region, pre_target)
                 log.info(
                     "region %r carries no real fault labels, so the injection "
                     "rate is IMPORTED from region %r: %.5f (§5.5). It is not "
@@ -341,7 +406,7 @@ def run(region: str, inject_synthetic: bool = False,
             m = process_station(
                 long_df, sid, cfg, inject_synthetic=inject_synthetic,
                 synthetic_rate=synthetic_rate, meteo=meteo, write=write,
-                variant=variant,
+                variant=variant, borrowed_durations=borrowed_durations,
             )
         except Exception as exc:  # noqa: BLE001 — one bad station must not stop the run
             log.error("%s | EXCLUDED: %s", sid, exc)
@@ -357,7 +422,12 @@ def run(region: str, inject_synthetic: bool = False,
             "train": m["windows"]["train"],
             "val": m["windows"]["val"],
             "test": m["windows"]["test"],
-            "test_fault_rate": m["fault_rate_by_split"]["test"],
+            # Both, always, never merged (§5.3). Reporting only the real rate
+            # made an injected Indian build look faultless: CPCB has no
+            # Validity equivalent, so its real rate is correctly None while its
+            # synthetic rate is the whole point of the build.
+            "test_fault_rate_real": m["fault_rate_by_split"]["test"],
+            "test_fault_rate_synth": m["synthetic_fault_rate_by_split"]["test"],
         })
 
     if write:

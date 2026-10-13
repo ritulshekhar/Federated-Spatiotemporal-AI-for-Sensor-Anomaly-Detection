@@ -134,6 +134,7 @@ def inject_faults(
     use_real_durations: bool = True,
     eligible_after: pd.Timestamp | None = None,
     drift_sigma_per_72h: tuple[float, float] = DRIFT_SIGMA_PER_72H,
+    real_durations: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, InjectionReport]:
     """Inject rate-matched synthetic faults into ``pollutant``, in place on a copy.
 
@@ -193,14 +194,29 @@ def inject_faults(
 
     # §2.1a: prefer the real Validity episode-duration distribution over the
     # invented per-type ranges.
-    real_durations = real_episode_durations(frame, pollutant) if use_real_durations \
-        else np.empty(0, dtype=int)
-    duration_source = "real_validity_episodes" if real_durations.size else "type_defaults"
+    # A caller may supply the distribution instead, which is how a region with
+    # no Validity flags of its own (CPCB/India) still gets REAL episode
+    # durations rather than invented ones -- the same argument 5.5 makes for
+    # borrowing the rate. Recorded as "borrowed" in the report so a write-up
+    # cannot confuse "measured here" with "measured elsewhere".
+    borrowed = real_durations is not None and len(real_durations) > 0
+    if borrowed:
+        real_durations = np.asarray(real_durations, dtype=int)
+    elif use_real_durations:
+        real_durations = real_episode_durations(frame, pollutant)
+    else:
+        real_durations = np.empty(0, dtype=int)
+
+    duration_source = (
+        "real_validity_episodes_borrowed" if borrowed and real_durations.size
+        else "real_validity_episodes" if real_durations.size
+        else "type_defaults"
+    )
     if use_real_durations and not real_durations.size:
         log.warning(
-            "%s/%s | no real Validity episodes to sample durations from; falling "
-            "back to the invented per-type ranges. Say so in any write-up.",
-            station_id, pollutant,
+            "%s/%s | no real Validity episodes to sample durations from, and "
+            "none supplied; falling back to the invented per-type ranges. Say "
+            "so in any write-up.", station_id, pollutant,
         )
 
     # Budget is split evenly *by row count* across fault types, not by episode
