@@ -211,7 +211,7 @@ def harmonize_cpcb(
             "no CPCB rows survived harmonization — every timestamp or pollutant "
             "failed to parse. Inspect the raw export before continuing."
         )
-    out = _convert_openaq_co_to_mg(out)
+    out = _convert_openaq_units(out)
     out = _canonicalise_units(out)
     log.info("CPCB/OpenAQ: %s rows, %d station(s), pollutants %s",
              f"{len(out):,}", out["station_id"].nunique(),
@@ -219,35 +219,90 @@ def harmonize_cpcb(
     return _finalise(out)
 
 
-def _convert_openaq_co_to_mg(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert OpenAQ's CO from ug/m3 to the project's canonical mg/m3.
+#: ppb -> ug/m3 at 25 C and 1013.25 hPa, the convention EEA and US EPA report
+#: against: ug/m3 = ppb * molar_mass / 24.45.
+_PPB_TO_UGM3 = {
+    "NO2": 46.0055 / 24.45,   # 1.8816
+    "SO2": 64.066 / 24.45,    # 2.6203
+    "O3": 48.00 / 24.45,      # 1.9632
+}
 
-    The §3.1 unit trap, arriving from the other direction. EEA reports CO in
-    mg/m3 and `CANONICAL_UNITS` encodes that, but the OpenAQ archive reports
-    **every** parameter in ug/m3 — an observed Delhi reading is `co, ug/m3,
-    1500.0`, which is 1.5 mg/m3 and entirely plausible for that city. Left
-    alone, `_canonicalise_units` would (correctly) refuse the mismatch and the
-    whole Indian harmonization would fail.
 
-    This is a real conversion, applied only to this source and only to CO, not
-    a relaxation of the check: `_canonicalise_units` still runs afterwards and
-    still raises on anything else. Converting here rather than widening
-    `CANONICAL_UNITS` keeps the EEA guard exactly as strict as it was — a
-    CO-in-ug/m3 row arriving from EEA remains an error, because for EEA it is
-    one.
+def _convert_openaq_units(df: pd.DataFrame) -> pd.DataFrame:
+    """Bring OpenAQ's two different unit regimes onto the §3.1 canonical units.
+
+    The §3.1 unit trap, arriving from two directions at once. Measured across
+    the Delhi archive (locations 5586/5622/5626, 2020 vs 2025):
+
+    ====== ============ ==========
+    param  2020         2025
+    ====== ============ ==========
+    NO2    ug/m3        **ppb**
+    SO2    ug/m3        **ppb**
+    CO     ug/m3        **ppb**
+    O3     ug/m3        ug/m3
+    PM10   ug/m3        ug/m3
+    PM2.5  ug/m3        ug/m3
+    ====== ============ ==========
+
+    **OpenAQ changed the reported unit for the gases partway through the
+    archive.** Concatenating the two regimes untouched would put a 2-3x step
+    change into the middle of the NO2 series — the project's target — which is
+    indistinguishable from an enormous sensor fault and would corrupt exactly
+    the experiment this data is for. So the conversion is not a nicety.
+
+    Three cases:
+
+    * **NO2, SO2, O3 in ppb** convert with the standard molar factors above.
+    * **CO in ug/m3** converts to mg/m3, the §3.1 canonical unit for CO.
+    * **CO in ppb is dropped**, because the label is demonstrably wrong rather
+      than merely inconvenient: the 2025 median is 1.08 "ppb", which as ppb
+      would be 1.24 ug/m3, against 2010 ug/m3 for the same station in 2020.
+      Read as ppm it is 1.24 mg/m3, consistent. The archive means ppm and says
+      ppb, and guessing which on a per-row basis is not something to do
+      silently. CO is not in this project's target or feature set (§ data.yaml),
+      so dropping it costs nothing.
+
+    This cannot be validated against an overlap, because the archive has no
+    year in both regimes — 2023 and 2024 are missing entirely. The factors are
+    standard, but the absence of a cross-check is a real limitation and belongs
+    in any write-up that uses pre-2023 Indian data. Restricting to a single
+    regime (2025 onward) avoids the question altogether and is the recommended
+    default.
+
+    `_canonicalise_units` still runs afterwards and still raises on anything
+    unresolved, so the EEA guard is untouched: CO in ug/m3 arriving from EEA
+    remains an error, because for EEA it is one.
     """
     df = df.copy()
     unit = (df["unit"].astype(str).str.strip().str.lower()
             .map(lambda u: _UNIT_ALIASES.get(u, u)))
+    conc = pd.to_numeric(df["concentration"], errors="coerce")
+
     co_in_ug = (df["pollutant"] == "CO") & (unit == "ug/m3")
-    n = int(co_in_ug.sum())
-    if n:
-        df.loc[co_in_ug, "concentration"] = (
-            pd.to_numeric(df.loc[co_in_ug, "concentration"], errors="coerce") / 1000.0
-        )
+    if (n := int(co_in_ug.sum())):
+        df.loc[co_in_ug, "concentration"] = conc[co_in_ug] / 1000.0
         df.loc[co_in_ug, "unit"] = "mg/m3"
-        log.info("converted %s CO reading(s) from ug/m3 to mg/m3 (§3.1 "
-                 "canonical unit for CO)", f"{n:,}")
+        log.info("converted %s CO reading(s) from ug/m3 to mg/m3", f"{n:,}")
+
+    for pol, factor in _PPB_TO_UGM3.items():
+        sel = (df["pollutant"] == pol) & (unit == "ppb")
+        if (n := int(sel.sum())):
+            df.loc[sel, "concentration"] = conc[sel] * factor
+            df.loc[sel, "unit"] = "ug/m3"
+            log.info("converted %s %s reading(s) from ppb to ug/m3 (x%.4f)",
+                     f"{n:,}", pol, factor)
+
+    co_in_ppb = (df["pollutant"] == "CO") & (unit == "ppb")
+    if (n := int(co_in_ppb.sum())):
+        log.warning(
+            "dropping %s CO reading(s) labelled ppb: the archive's values are "
+            "~1000x too small for ppb and match ppm instead, so the unit label "
+            "is wrong and the true one cannot be established per row. CO is "
+            "outside this project's target and feature set, so this costs "
+            "nothing.", f"{n:,}",
+        )
+        df = df[~co_in_ppb].copy()
     return df
 
 

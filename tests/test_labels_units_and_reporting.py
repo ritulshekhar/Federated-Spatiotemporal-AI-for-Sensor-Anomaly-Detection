@@ -11,7 +11,7 @@ import pytest
 
 from src.data.harmonize import (
     FAULT_VALIDITY_CODES, VALID_VALIDITY_CODES, _canonicalise_units,
-    label_from_validity, real_fault_rate,
+    _convert_openaq_units, label_from_validity, real_fault_rate,
 )
 from src.evaluation.metrics import anomaly_metrics, extreme_mask, forecast_metrics
 from src.evaluation.report import PoolingError, anomaly_table, forecast_table
@@ -46,15 +46,13 @@ def test_unit_mismatch_raises_rather_than_coercing():
 def test_openaq_co_is_converted_to_mg_not_rejected():
     """§3.1's unit trap from the other direction.
 
-    OpenAQ reports every parameter in ug/m3, CO included — a real Delhi
-    reading is `co, ug/m3, 1500.0`, which is 1.5 mg/m3. Without the
+    OpenAQ's 2020 regime reports every parameter in ug/m3, CO included — a
+    real Delhi reading is `co, ug/m3, 1500.0`, which is 1.5 mg/m3. Without the
     conversion the whole Indian harmonization dies on the unit check.
     """
-    from src.data.harmonize import _convert_openaq_co_to_mg
-
     df = pd.DataFrame({"pollutant": ["CO", "NO2"], "unit": ["µg/m³", "µg/m³"],
                        "concentration": [1500.0, 36.1]})
-    out = _convert_openaq_co_to_mg(df)
+    out = _convert_openaq_units(df)
 
     assert out.loc[0, "concentration"] == pytest.approx(1.5)
     assert out.loc[0, "unit"] == "mg/m3"
@@ -62,6 +60,44 @@ def test_openaq_co_is_converted_to_mg_not_rejected():
     assert out.loc[1, "concentration"] == pytest.approx(36.1)
     # And the strict check still passes afterwards rather than being bypassed.
     _canonicalise_units(out)
+
+
+def test_openaq_ppb_gases_are_converted_to_ugm3():
+    """OpenAQ switched the gases to ppb partway through the archive.
+
+    Concatenating the regimes untouched would put a ~2x step into the middle
+    of the NO2 series — the target — looking exactly like a huge sensor fault.
+    """
+    df = pd.DataFrame({
+        "pollutant": ["NO2", "SO2", "O3", "PM10"],
+        "unit": ["ppb", "ppb", "ppb", "µg/m³"],
+        "concentration": [37.22, 46.81, 10.0, 235.0],
+    })
+    out = _convert_openaq_units(df)
+
+    assert out.loc[0, "concentration"] == pytest.approx(37.22 * 46.0055 / 24.45)
+    assert out.loc[1, "concentration"] == pytest.approx(46.81 * 64.066 / 24.45)
+    assert out.loc[2, "concentration"] == pytest.approx(10.0 * 48.00 / 24.45)
+    # PM was never in ppb and must not be scaled.
+    assert out.loc[3, "concentration"] == pytest.approx(235.0)
+    assert not (out["unit"] == "ppb").any(), "a ppb unit survived conversion"
+    # Spelling normalisation is _canonicalise_units' job, which must now accept
+    # every row rather than raise.
+    assert (_canonicalise_units(out)["unit"] == "ug/m3").all()
+
+
+def test_openaq_co_in_ppb_is_dropped_not_guessed():
+    """The archive's CO values are ~1000x too small for ppb; it means ppm.
+
+    Rather than guess per row, drop it — CO is outside the project's target
+    and feature set, so the cost is nil and a wrong guess would not be.
+    """
+    df = pd.DataFrame({"pollutant": ["CO", "NO2"], "unit": ["ppb", "ppb"],
+                       "concentration": [1.08, 37.22]})
+    out = _convert_openaq_units(df)
+
+    assert (out["pollutant"] == "NO2").all(), "CO in ppb should be dropped"
+    assert len(out) == 1
 
 
 def test_co_in_ug_from_eea_still_raises():
