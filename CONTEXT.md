@@ -1880,3 +1880,135 @@ under `region_first` to 0.333.
   run. Memory, not CPU, is the binding constraint: 1.6 GB free against a job
   holding 1.7 GB, so starting a second training run risks OOM-killing an
   18-hour one.
+
+---
+
+## [2026-10-13] entry 20 — the Indian dataset is real now, and the archive fought back
+
+The owner supplied an OpenAQ API key, which unblocked Objective-adjacent Phase 3
+work that had been stalled with zero Indian rows. The key lives in a gitignored
+`.env` — `.gitignore` did not previously cover `.env` at all, which it now does.
+
+Station discovery works against the live v3 API: **78 Delhi locations**, CPCB as
+the upstream provider, as §3.2 expected. Everything after that was harder than
+the plan assumed, and all of it was found by measuring the archive rather than
+trusting its documentation.
+
+### The archive's coverage is full of holes
+
+Surveyed across 14 Delhi stations:
+
+| year | stations with ≥300 days |
+|---|---|
+| 2016, 2017 | 2 |
+| 2020 | 8 |
+| 2025 | 11 |
+| 2018, 2019, 2021, 2022 | 0 (100–280 days each) |
+| **2023, 2024** | **absent entirely, every station** |
+
+So there is no eight-year window to mirror Catalonia's 2017–2024, and the first
+attempted pull — 2019–2024, the module's own defaults — returned **nothing** for
+location 17 and aborted the whole run. `fetch` now skips an empty location
+instead of abandoning the other six.
+
+### Three schema facts the plan had wrong
+
+**It is quarter-hourly, not hourly.** Measured spacing is exactly 00:15:00.
+Every stage downstream assumes hourly — §6.1's index, §6.4's t-1/t-24/t-168
+lags, EEA's own `AveragingTime = hour`. Feeding 15-minute rows in would have
+silently reindexed four samples onto one hour and kept the last, throwing away
+three quarters of the data *and* making India's effective sampling differ from
+Catalonia's. Now averaged to hourly means (3.76 samples per hour in practice),
+with hours backed by a single sample dropped.
+
+**CO's unit label is wrong.** The 2025 median is 1.08 "ppb". As ppb that is
+1.24 µg/m³, against 2010 µg/m³ for the same station in 2020. Read as ppm it is
+1.24 mg/m³ — consistent. The archive means ppm and says ppb. CO is dropped for
+this source rather than guessed at; it is outside the project's target and
+feature set, so the cost is nil.
+
+**A unit is a property of the sensor, not the year.** This corrected a wrong
+conclusion of my own. The pattern in the data looks exactly like "OpenAQ
+switched units in 2025" — NO₂/SO₂ are µg/m³ in 2020–21 and ppb in 2025–26,
+consistently across stations. But the v3 metadata for location 5626 lists **two
+sensors per gas**:
+
+```
+no2  units=ug/m3  displayName="NO2 mass"
+no2  units=ppb    displayName="NO2"
+so2  units=ug/m3  displayName="SO2 mass"
+so2  units=ppb    displayName="SO2"
+```
+
+What changed is which sensor feeds the archive. That matters because it makes
+`unit` load-bearing in a place it is easy to miss: the resampler keyed on
+(station, pollutant, hour) and would have cheerfully averaged a µg/m³ value
+together with a ppb one. It now keeps only the best basis present for each hour
+and **prefers mass**, so the molar conversion's 25 °C assumption usually goes
+unused rather than merely documented. No day in the sample had both sensors
+reporting, so the bug was latent rather than active — but the metadata says it
+can happen.
+
+### The conversion is sound for NO₂ and suspect for SO₂
+
+Sampled over 4 stations × 4 years × 3 days:
+
+| pollutant | 2020–21 (mass) | 2025–26 (ppb) | converted | plausible? |
+|---|---|---|---|---|
+| NO₂ | 23.3 / 20.5 µg/m³ | 41.3 / 31.5 ppb | ~78 µg/m³ | yes for Delhi |
+| SO₂ | 6.1 / 5.8 µg/m³ | 17.2 / 14.0 ppb | ~45 µg/m³ | **no** — Delhi runs 5–20 |
+
+SO₂'s converted magnitude is roughly 7× the same station's own mass sensor. SO₂
+is a feature rather than the target, and §6's `min_feature_coverage` gate may
+drop it per station anyway, but it should be treated with suspicion and not
+reported in physical units without this caveat.
+
+### What actually matters is continuity, not accuracy
+
+Worth stating because the obvious worry is the wrong one. A *constant* unit
+error is nearly harmless here: §6.5 fits a z-score per station on that station's
+own training window, so multiplying a whole station-pollutant series by 1.88 is
+absorbed almost entirely by the scaler, surviving only in physical-unit
+reporting and not in the normalised residuals the detector thresholds on.
+
+A unit change *partway through one station's series* is a different animal
+entirely — a step discontinuity of 1.9–2.6× that no real instrument produces,
+landing in whichever split contains it. In train it teaches the forecaster a
+phantom regime change; in test it is indistinguishable from a catastrophic
+sensor fault and would be "detected" as the project's headline result.
+
+`_check_basis_continuity` now warns and names every straddling series, verified
+by deliberately harmonizing a 2021 day together with a 2025 one. The changeover
+sits between 2021 and 2025 — inside the 2023–2024 hole — so the default window
+of **2025–2026** lies cleanly on one side of it: densest coverage, contiguous,
+11 stations available, one sensor basis throughout.
+
+### Also fixed: the downloader was losing data silently
+
+A failed object was caught and logged as a skip. That is the worst available
+failure mode: the resulting hole is invisible downstream, looks exactly like a
+sensor outage, and §6.2 imputes straight over it. Objects are now retried with
+backoff, failures counted, and a pull losing more than 5% of its objects fails
+rather than quietly yielding a thin dataset.
+
+### State
+
+Seven Delhi stations downloading for 2020–2026 (a superset of the default
+window, so both regimes are on disk for the record): 5622, 5626, 5630, 5586,
+5570, 5610, 5627, about 1,291 objects each, zero failures so far. `station_class`
+for these is **inferred** from each station's name and siting — CPCB publishes
+station types but OpenAQ does not carry them — and `configs/data.yaml` says so,
+so any India result grouped by station class inherits that caveat.
+
+Still LOCKED and still true: India is a secondary generalization experiment
+(§2.6), every Indian row carries `label_source="synthetic"`, and `_main_cpcb`
+asserts both rather than trusting them.
+
+### Unrelated, same day: the 69-station scale run died with nothing
+
+The ~18-hour run reached rung 5 round 16 and then exited 1, producing no
+`outputs/phase3_scale71` at all. Its traceback is gone — the task's stdout file
+had been truncated to 16 bytes — but it was holding 2.13 GB with 0.5 GB of
+system memory free, so memory exhaustion is the overwhelmingly likely cause. The
+n=69 statistical-power work from entry 16 therefore remains unmeasured, and a
+re-run needs either a smaller node set or batched client training.
