@@ -99,8 +99,20 @@ def load_region(region: str, variant: str = "",
     ``max_stations`` truncates the station LIST before any window array is
     read, which is the whole point: loading 69 stations and then discarding 39
     of them still pays the full peak memory, and that peak is what killed two
-    ~18-hour runs. Sorted first so the subset is reproducible rather than
-    manifest order.
+    ~18-hour runs.
+
+    Stations are chosen by **training coverage**, most-covered first, and this
+    is a requirement rather than a preference. Rungs 4 and 6 can only use
+    window origins present at *every* participating station, so one station
+    with a short or offset record empties the intersection for all of them.
+    Measured on the Catalan set: picking by coverage retains 42,076 of 48,892
+    common train origins at 30 stations (86%), while picking the 30
+    alphabetically first retains **zero**: the intersection erodes to 8,982 and
+    is then emptied outright by ES1347A, which contributes only 5,416 windows.
+    The full 69 retain zero under any selection, which is why the spatial rungs
+    cannot run on the whole network at all -- see CONTEXT.md.
+
+    Ties break on station id, so the subset stays reproducible.
     """
     manifest_path = variant_root("processed", variant) / f"run_manifest_{region}.json"
     if not manifest_path.exists():
@@ -112,10 +124,28 @@ def load_region(region: str, variant: str = "",
         )
     ids = json.loads(manifest_path.read_text(encoding="utf-8"))["stations_processed"]
     if max_stations is not None and len(ids) > max_stations:
-        ids = sorted(ids)[:max_stations]
-        log.info("loading only %d of the region's stations: %s ... %s",
-                 len(ids), ids[0], ids[-1])
+        ids = _best_covered(ids, variant, max_stations)
+        log.info("loading only %d of the region's stations, chosen by training "
+                 "coverage: %s", len(ids), ", ".join(ids[:6]) + " ...")
     return [load_station(sid, variant=variant) for sid in ids]
+
+
+def _best_covered(ids: list[str], variant: str, keep: int) -> list[str]:
+    """The ``keep`` stations with the most training windows.
+
+    Reads only each station's ``t0`` array, not its window payloads, so the
+    choice costs a few MB rather than the full load it exists to avoid.
+    """
+    counts = {}
+    for sid in ids:
+        path = station_dir(sid, "processed", variant=variant) / "train.npz"
+        try:
+            with np.load(path, allow_pickle=True) as z:
+                counts[sid] = len(z["t0"])
+        except Exception as exc:  # noqa: BLE001 -- a station we cannot size
+            log.warning("cannot size %s, ranking it last: %s", sid, exc)
+            counts[sid] = -1
+    return sorted(sorted(ids), key=lambda s: -counts[s])[:keep]
 
 
 # ---------------------------------------------------------------------------
