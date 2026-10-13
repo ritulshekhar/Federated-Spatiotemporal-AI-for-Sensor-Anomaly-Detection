@@ -55,6 +55,7 @@ import argparse
 import gzip
 import io
 import os
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -62,7 +63,7 @@ import pandas as pd
 import requests
 
 from src.utils.logging_setup import get_logger
-from src.utils.paths import data_paths
+from src.utils.paths import REPO_ROOT, data_paths
 
 log = get_logger(__name__)
 
@@ -84,12 +85,36 @@ PARAMETER_MAP = {
 }
 
 
+def _from_dotenv(name: str) -> str | None:
+    """Read one key from a gitignored ``.env`` at the repo root.
+
+    Deliberately hand-rolled rather than adding a python-dotenv dependency for
+    a single secret, and deliberately *not* exported into ``os.environ`` — the
+    key is handed to the one request that needs it and nothing else.
+    """
+    path = REPO_ROOT / ".env"
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == name:
+            return v.strip().strip('"').strip("'") or None
+    return None
+
+
 def _api_key(api_key: str | None = None) -> str:
-    key = api_key or os.environ.get("OPENAQ_API_KEY")
+    key = (api_key or os.environ.get("OPENAQ_API_KEY")
+           or _from_dotenv("OPENAQ_API_KEY"))
     if not key:
         raise RuntimeError(
             "an OpenAQ API key is required for station discovery only. Register "
-            "free at https://explore.openaq.org/register, then set it:\n"
+            "free at https://explore.openaq.org/register, then either put it in "
+            "a gitignored .env at the repo root:\n"
+            "  OPENAQ_API_KEY=<your key>\n"
+            "or set it in the environment:\n"
             '  $env:OPENAQ_API_KEY = "<your key>"     (PowerShell)\n'
             "  export OPENAQ_API_KEY=<your key>       (bash)\n"
             "The bulk history download afterwards needs no credentials."
@@ -176,18 +201,33 @@ def list_archive_keys(location_id: int, year_from: int | None = None,
     return sorted(keys)
 
 
-def read_archive_object(key: str) -> pd.DataFrame:
+def read_archive_object(key: str, retries: int = 3,
+                        backoff: float = 2.0) -> pd.DataFrame:
     """Download and parse one gzipped archive CSV.
 
     ``encoding="utf-8"`` is not optional. The archive stores units as "µg/m³",
     and letting gzip fall back to the platform default (cp1252 on Windows)
     mangles that into "Âµg/mÂ³", which then fails the unit check in
     ``harmonize._canonicalise_units`` — as it should.
+
+    Retried because a full pull is thousands of sequential requests against a
+    public bucket, and ``download_location`` treats a failed object as a skip.
+    Without retries a transient blip becomes a silently missing day of data,
+    which is the worst possible failure mode here: the gap is invisible
+    downstream and looks like a sensor outage.
     """
-    resp = requests.get(f"{OPENAQ_S3}/{key}", timeout=120)
-    resp.raise_for_status()
-    with gzip.open(io.BytesIO(resp.content), "rt", encoding="utf-8") as fh:
-        return pd.read_csv(fh)
+    last: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(f"{OPENAQ_S3}/{key}", timeout=120)
+            resp.raise_for_status()
+            with gzip.open(io.BytesIO(resp.content), "rt", encoding="utf-8") as fh:
+                return pd.read_csv(fh)
+        except (requests.RequestException, OSError, EOFError) as exc:
+            last = exc
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+    raise RuntimeError(f"{key}: failed after {retries} attempt(s)") from last
 
 
 def inspect_schema(location_id: int, api_key: str | None = None) -> pd.DataFrame:
@@ -233,17 +273,33 @@ def download_location(location_id: int, year_from: int, year_to: int,
         )
     log.info("location %d: downloading %d object(s)", location_id, len(keys))
 
-    frames = []
+    frames, failed = [], []
     for i, key in enumerate(keys, 1):
         try:
             frames.append(read_archive_object(key))
         except Exception as exc:  # noqa: BLE001 — one bad object must not stop the pull
+            failed.append(key)
             log.warning("skipping %s: %s", key, exc)
-        if i % 12 == 0:
-            log.info("  %d/%d objects", i, len(keys))
+        if i % 100 == 0:
+            log.info("  %d/%d objects (%d failed)", i, len(keys), len(failed))
 
     if not frames:
         raise ValueError(f"every object failed for location {location_id}")
+
+    # A skipped object is an invisible hole in the series: downstream it is
+    # indistinguishable from a sensor outage, and §6.2 would impute straight
+    # over it. A few are tolerable and logged; a lot means the pull is not
+    # trustworthy and should fail rather than quietly produce a thin dataset.
+    share = len(failed) / len(keys)
+    if failed:
+        log.warning("location %d: %d of %d object(s) failed (%.1f%%)",
+                    location_id, len(failed), len(keys), 100 * share)
+    if share > 0.05:
+        raise RuntimeError(
+            f"location {location_id}: {len(failed)} of {len(keys)} objects "
+            f"({100 * share:.1f}%) failed to download, above the 5% tolerance. "
+            "Re-run to resume — successful locations are cached as parquet."
+        )
     df = pd.concat(frames, ignore_index=True)
 
     missing = [c for c in REQUIRED_ARCHIVE_COLUMNS if c not in df.columns]
@@ -261,12 +317,31 @@ def download_location(location_id: int, year_from: int, year_to: int,
 
 def fetch(location_ids: list[int], year_from: int = 2019, year_to: int = 2024,
           api_key: str | None = None) -> pd.DataFrame:
-    """Download several locations and return them concatenated (still raw)."""
-    frames = [pd.read_parquet(download_location(lid, year_from, year_to))
-              for lid in location_ids]
+    """Download several locations and return them concatenated (still raw).
+
+    A location with nothing in the requested window is skipped rather than
+    fatal. The OpenAQ archive's CPCB coverage is genuinely discontinuous —
+    2023 and 2024 are absent for every Delhi station surveyed — so one empty
+    station must not abandon the other six.
+    """
+    frames, skipped = [], []
+    for lid in location_ids:
+        try:
+            frames.append(pd.read_parquet(
+                download_location(lid, year_from, year_to)))
+        except FileNotFoundError as exc:
+            skipped.append(lid)
+            log.warning("location %d skipped: %s", lid, exc)
+
+    if not frames:
+        raise FileNotFoundError(
+            f"no location had archive objects in {year_from}-{year_to}. "
+            "Survey coverage first — the archive has multi-year holes."
+        )
     df = pd.concat(frames, ignore_index=True)
-    log.info("CPCB/OpenAQ: %s raw rows across %d location(s)",
-             f"{len(df):,}", len(location_ids))
+    log.info("CPCB/OpenAQ: %s raw rows across %d location(s)%s",
+             f"{len(df):,}", len(location_ids) - len(skipped),
+             f", {len(skipped)} skipped as empty: {skipped}" if skipped else "")
     return df
 
 

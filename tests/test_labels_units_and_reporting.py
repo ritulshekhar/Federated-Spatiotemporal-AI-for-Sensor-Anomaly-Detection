@@ -43,6 +43,38 @@ def test_unit_mismatch_raises_rather_than_coercing():
         _canonicalise_units(df)
 
 
+def test_openaq_co_is_converted_to_mg_not_rejected():
+    """§3.1's unit trap from the other direction.
+
+    OpenAQ reports every parameter in ug/m3, CO included — a real Delhi
+    reading is `co, ug/m3, 1500.0`, which is 1.5 mg/m3. Without the
+    conversion the whole Indian harmonization dies on the unit check.
+    """
+    from src.data.harmonize import _convert_openaq_co_to_mg
+
+    df = pd.DataFrame({"pollutant": ["CO", "NO2"], "unit": ["µg/m³", "µg/m³"],
+                       "concentration": [1500.0, 36.1]})
+    out = _convert_openaq_co_to_mg(df)
+
+    assert out.loc[0, "concentration"] == pytest.approx(1.5)
+    assert out.loc[0, "unit"] == "mg/m3"
+    # NO2 is already canonical and must be left alone, value and unit both.
+    assert out.loc[1, "concentration"] == pytest.approx(36.1)
+    # And the strict check still passes afterwards rather than being bypassed.
+    _canonicalise_units(out)
+
+
+def test_co_in_ug_from_eea_still_raises():
+    """The conversion must not weaken the EEA guard it sits next to.
+
+    For EEA, CO in ug/m3 is an error and has to stay one — only the OpenAQ
+    path is permitted to convert.
+    """
+    df = pd.DataFrame({"pollutant": ["CO"], "unit": ["ug/m3"]})
+    with pytest.raises(ValueError, match="unit mismatch"):
+        _canonicalise_units(df)
+
+
 def test_known_unit_spellings_are_normalised():
     df = pd.DataFrame({"pollutant": ["NO2", "PM10", "CO"],
                        "unit": ["µg/m3", "ug.m-3", "mg.m-3"]})

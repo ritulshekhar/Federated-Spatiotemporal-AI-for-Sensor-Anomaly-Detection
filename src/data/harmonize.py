@@ -211,11 +211,44 @@ def harmonize_cpcb(
             "no CPCB rows survived harmonization — every timestamp or pollutant "
             "failed to parse. Inspect the raw export before continuing."
         )
+    out = _convert_openaq_co_to_mg(out)
     out = _canonicalise_units(out)
     log.info("CPCB/OpenAQ: %s rows, %d station(s), pollutants %s",
              f"{len(out):,}", out["station_id"].nunique(),
              sorted(out["pollutant"].unique()))
     return _finalise(out)
+
+
+def _convert_openaq_co_to_mg(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert OpenAQ's CO from ug/m3 to the project's canonical mg/m3.
+
+    The §3.1 unit trap, arriving from the other direction. EEA reports CO in
+    mg/m3 and `CANONICAL_UNITS` encodes that, but the OpenAQ archive reports
+    **every** parameter in ug/m3 — an observed Delhi reading is `co, ug/m3,
+    1500.0`, which is 1.5 mg/m3 and entirely plausible for that city. Left
+    alone, `_canonicalise_units` would (correctly) refuse the mismatch and the
+    whole Indian harmonization would fail.
+
+    This is a real conversion, applied only to this source and only to CO, not
+    a relaxation of the check: `_canonicalise_units` still runs afterwards and
+    still raises on anything else. Converting here rather than widening
+    `CANONICAL_UNITS` keeps the EEA guard exactly as strict as it was — a
+    CO-in-ug/m3 row arriving from EEA remains an error, because for EEA it is
+    one.
+    """
+    df = df.copy()
+    unit = (df["unit"].astype(str).str.strip().str.lower()
+            .map(lambda u: _UNIT_ALIASES.get(u, u)))
+    co_in_ug = (df["pollutant"] == "CO") & (unit == "ug/m3")
+    n = int(co_in_ug.sum())
+    if n:
+        df.loc[co_in_ug, "concentration"] = (
+            pd.to_numeric(df.loc[co_in_ug, "concentration"], errors="coerce") / 1000.0
+        )
+        df.loc[co_in_ug, "unit"] = "mg/m3"
+        log.info("converted %s CO reading(s) from ug/m3 to mg/m3 (§3.1 "
+                 "canonical unit for CO)", f"{n:,}")
+    return df
 
 
 # ---------------------------------------------------------------------------

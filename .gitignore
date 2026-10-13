@@ -1,3 +1,9 @@
+# --- secrets (never committed; OPENAQ_API_KEY lives in .env) ---
+.env
+.env.*
+!.env.example
+*.key
+
 # --- environments ---
 .venv/
 venv/
