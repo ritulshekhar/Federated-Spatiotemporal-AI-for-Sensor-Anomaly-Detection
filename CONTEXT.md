@@ -2012,3 +2012,110 @@ had been truncated to 16 bytes — but it was holding 2.13 GB with 0.5 GB of
 system memory free, so memory exhaustion is the overwhelmingly likely cause. The
 n=69 statistical-power work from entry 16 therefore remains unmeasured, and a
 re-run needs either a smaller node set or batched client training.
+
+---
+
+## [2026-10-13] entry 21 — the owner amends §2.4, and the scale-up gets smaller
+
+Two decisions taken by the project owner after being asked explicitly, plus the
+code that implements them. Both were blocking; neither was mine to make alone.
+
+### §2.4a — one coarse ordinal may now leave a node
+
+**The decision.** Offered a coarse ordinal bucket, a continuous signed scalar,
+or refusing outright and reporting drift as permanently unreachable, the owner
+chose the **coarse ordinal**. Recorded in CLAUDE.md §2.4a, with §2.4 itself
+narrowed rather than rewritten — the prohibition on raw readings and on
+normalization statistics is untouched and still absolute. What changed is the
+"more than the hidden state" clause.
+
+**Why anything was needed.** Entry 15 is the reason, and it is worth restating
+because the obvious framing is wrong. Drift is not undetected because the
+threshold is badly tuned. A sensor that drifts slowly stays *easy to forecast* —
+the forecaster tracks the drift — so the residual that the entire decision layer
+rests on **shrinks** rather than grows. No amount of server-side cleverness over
+residuals or embeddings can recover a signal the residual never carried. Drift
+recall sat at 0.000 at the alert operating point for every rung, including the
+centralised ST-GNN with full raw access. Either a drift-sensitive quantity
+crosses the boundary or drift is out of reach, permanently.
+
+**What leaves the node.** One integer in 0–4. One byte. Computed **after** §6.5
+z-scoring, on the station's own normalised series, averaged over 72 hours to
+match the drift episode floor in `fault_labels.py`.
+
+The defence is specific, not rhetorical: because the bucket is computed on
+normalised data it says "I currently sit about one of my own standard deviations
+above my own training mean" and nothing whatever about what that is in µg/m³.
+The scaler never leaves the node, so absolute level and absolute scale are both
+unrecoverable from an ordinal in 0–4. It is strictly coarser than the
+`encoder_hidden_state` already permitted, which is a continuous float vector
+over the same window. There is a test asserting that two stations with different
+physical levels but the same normalised shape yield the same bucket — if that
+ever fails, the field has begun leaking scale and the amendment's justification
+is void.
+
+**The mechanism.** Stations in a region share weather and pollution regimes, so
+a genuine episode lifts every bucket together and disagreement stays near zero.
+One station's bucket rising while its neighbours hold is that station's own
+calibration moving. This is §7.4's spatial-agreement argument applied to *level*
+instead of *residual*. Verified: a region-wide episode flags nobody (the Gupchup
+2019 control, as a test), one diverging station is flagged, and a station with
+too few neighbours is never flagged — absence of evidence is not evidence of
+drift, and flagging the network edge would just manufacture false positives.
+
+**Scope, kept narrow on purpose.** §2.4a permits one ordinal per station per
+*upload*. A bucket per hour would be a coarsely-quantised copy of the station's
+whole normalised level trajectory, which is materially more than what was
+approved, so it was not built. The consequence is real and must not be glossed:
+this identifies **stations** whose calibration has diverged, not **readings**.
+Per-reading drift recall remains unobtainable through this channel. Rung 6
+reports it as `drift_identification` with that scope stated inside the payload,
+separate from the per-reading anomaly table, scored against "did this station's
+test split receive any injected drift episode".
+
+Arguably that is the better deployment artefact anyway — drift is a station
+condition, and §8.2's "review" operating point exists to feed a maintenance
+list — but it is a narrower claim than "we detect drift", and the write-up has
+to say the narrower thing.
+
+**Cost to the novelty claim, stated plainly.** §1.2's claim is cross-node
+spatial reasoning under a federated constraint, and the constraint is now one
+field wider. Any write-up must describe the uploaded set as *weights, encoder
+hidden states, and a coarse ordinal level summary* — not "hidden states only".
+A reviewer may fairly ask what the ordinal leaks across many rounds; the honest
+answer is the shape of the station's own normalised level trajectory, which is
+information about its behaviour over time, not about its measurements.
+
+### The scale-up: 30 stations, not 69
+
+The 69-station run died twice, ~18 hours each time, producing no output
+whatsoever. Offered a retry at ~30 stations, a memory fix followed by the full
+69, or skipping it, the owner chose **30**.
+
+The useful discovery while planning it: **the expensive part already survived.**
+`data/processed/injected71` holds all 69 preprocessed stations, because both
+failures were in *training*, not preprocessing. Rebuilding to run fewer stations
+would have been pure waste.
+
+So station count is now a ladder flag (`--max-stations`) rather than a
+data-selection config value, and the two are deliberately decoupled:
+`station_selection.registry.max_stations` stays `null` so `coordinates()` can
+supply every station the graph might reference, while `--max-stations` picks the
+node set for a run. Previously a smaller training run would have implied a
+smaller coordinate set, which would have forced the rebuild. Stations are sorted
+by id before truncation so "the first 30" is reproducible rather than filesystem
+order.
+
+30 still roughly quadruples n over the 7-station build, which is what entry 16
+needs: at n=7 no subtype difference survives station-level resampling.
+
+### Operational note worth not repeating
+
+Both background jobs were relaunched through `| tail -N`, which buffers until
+EOF — so their logs sat at 0 bytes while the processes ran perfectly well. Use
+`Tee-Object`, or no pipe at all, for anything whose progress needs watching.
+
+An earlier pair of jobs died simultaneously with exit code 4 and no traceback in
+either; that was an external kill at the interrupt, not a bug in either. The
+CPCB downloader's parquet cache meant the download resumed rather than
+restarting, which is exactly what that cache is for.
