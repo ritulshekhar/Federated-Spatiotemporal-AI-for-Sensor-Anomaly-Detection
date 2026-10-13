@@ -77,6 +77,13 @@ station_selection:
   registry:
     provinces: ["08", "17", "25", "43"]
     require_pollutant: NO2
+    # Left at null so `coordinates()` can supply every registry station the
+    # graph might reference. How many stations are actually TRAINED on is a
+    # separate decision, made with `ladder.py --max-stations`, because the
+    # 69-station attempt died twice on memory (2.13 GB held against 0.5 GB
+    # free, no output across ~18 hours) while the preprocessed build itself is
+    # fine. Keeping the two apart means a smaller training run does not need a
+    # smaller coordinate set.
     max_stations: null
 
 # VERIFIED 2026-09-16 against data/raw/eea_station_metadata.csv. All ten EoI

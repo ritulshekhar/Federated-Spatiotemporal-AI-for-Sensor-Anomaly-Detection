@@ -842,7 +842,8 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
                out_name: str | None = None, variant: str = "",
                label_source: str = "auto",
                score_mode: str | None = None,
-               split_learning: bool | None = None) -> Path:
+               split_learning: bool | None = None,
+               max_stations: int | None = None) -> Path:
     """Run the Phase 1 rungs over one region and write one grouped report."""
     data_cfg = load_config("data")
     model_cfg = load_config("model")
@@ -853,6 +854,15 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
     stations = load_region(region, variant=variant)
     log.info("loaded %d station(s) for region %r (variant %r)", len(stations),
              region, variant or "clean")
+
+    if max_stations is not None and len(stations) > max_stations:
+        # Sorted first, so "the first 30" is a reproducible set rather than
+        # whatever order the filesystem happened to yield. The 69-station run
+        # exhausted memory; this is how a smaller node set is taken WITHOUT
+        # rebuilding the preprocessed data, which is intact and expensive.
+        stations = sorted(stations, key=lambda s: s.station_id)[:max_stations]
+        log.info("restricted to the first %d station(s) by id: %s ... %s",
+                 len(stations), stations[0].station_id, stations[-1].station_id)
 
     sc = model_cfg["decision_layer"].get("score", {})
     score_kwargs = {
@@ -964,6 +974,11 @@ def main() -> None:
     ap.add_argument("--score-mode", default=None,
                     choices=["absolute", "volatility"],
                     help="anomaly score form (default: configs/model.yaml)")
+    ap.add_argument("--max-stations", type=int, default=None,
+                    help="train on at most this many stations from the "
+                         "preprocessed build, chosen by sorted station id. Lets "
+                         "a smaller node set reuse an existing build instead of "
+                         "rebuilding it.")
     ap.add_argument("--no-split-learning", action="store_true",
                     help="rung 6 without the §7.2 embedding downlink. Per-window "
                          "hidden states cost ~216 MB/round at 7 clients and scale "
@@ -978,7 +993,8 @@ def main() -> None:
     out = run_phase1(args.region, rungs=tuple(args.rungs), out_name=args.name,
                      variant=args.variant, label_source=args.label_source,
                      score_mode=args.score_mode,
-                     split_learning=False if args.no_split_learning else None)
+                     split_learning=False if args.no_split_learning else None,
+                     max_stations=args.max_stations)
     print(f"\nreport -> {out}")
 
 
