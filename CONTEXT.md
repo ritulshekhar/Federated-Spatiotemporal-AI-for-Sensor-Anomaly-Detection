@@ -2173,3 +2173,104 @@ For the record, since it now has a clean explanation: the pair of jobs that both
 died at 19:38 with exit code 4 and no traceback were killed externally at the
 user interrupt, not by any fault of their own. The CPCB downloader's parquet
 cache did its job — the completed station was not re-downloaded on resume.
+
+---
+
+## [2026-10-13] entry 23 — the corrected injector changes nothing, and §2.4a's first result is a failure
+
+Two results from the same run (`outputs/phase4_drift_fixed`, 7 stations,
+rungs 1-6, split learning on). The first is reassuring, the second is not.
+
+### The drift correction does not move any conclusion
+
+Recall per fault subtype at 1h, averaged across models, old injector against
+corrected:
+
+| subtype | old (≈100× too fast) | corrected |
+|---|---|---|
+| spike | 0.548 | 0.537 |
+| noise | 0.402 | 0.388 |
+| dropout | 0.010 | 0.025 |
+| stuck_at | 0.000 | 0.022 |
+| bias | 0.000 | 0.000 |
+| **drift** | **0.000** | **0.000** |
+
+Everything except drift moves only within run-to-run noise, which is expected —
+nothing else was touched. Drift stays at exactly zero.
+
+**What changed is not the number but what it means.** Before, the project was
+reporting failure to detect drift two orders of magnitude more obvious than any
+real instrument produces, which made the zero *optimistic*: a reader could
+reasonably assume realistic drift would be even further out of reach, but that
+was an inference, not a measurement. It is now measured at the rate real
+co-located sensors actually drift. The zero is the honest one, and the
+dashboard caveat about the injector can be retired rather than merely corrected.
+
+Headline anomaly metrics at 3h (median across stations) are unchanged in shape:
+the proposed model leads on recall (0.276 against 0.230 for FedAvg) and AUC-PR
+(0.364, best of six) and pays for it in precision (0.503 against 0.714), with
+`fpr_on_extremes` 0.110 — still the §8.2 control that matters most.
+
+### §2.4a's first measurement failed, and the implementation is why
+
+Station-level drift identification from uploaded level buckets:
+**0 true positives, 1 false positive, 3 missed, 0 undecidable.**
+
+The raw output explains itself:
+
+```
+buckets      : ES0691A:3  ES1396A:3  ES1438A:3  ES1480A:3  ES1679A:3  ES1856A:4  ES1992A:3
+disagreement : 0.0        0.0        0.0        0.0        0.0        1.0        0.0
+flagged      : ES1856A
+had drift    : ES0691A, ES1438A, ES1480A
+```
+
+Every station sits in bucket 3 — slightly above its own training mean, a real
+and *shared* property of this test window, which is the regional co-movement
+the mechanism is supposed to see. Disagreement is correctly 0.0 almost
+everywhere. But the three stations that actually received injected drift sit at
+bucket 3 along with everyone else, and the single flagged station had no drift
+at all.
+
+**The mechanism is sound; the measurement is near-useless, and that is my
+implementation's fault.** `level_bucket` averages the **trailing 72 hours** of
+the series. The test split is roughly 10,000 hours. A drift episode of 72-336h
+sitting anywhere other than the final three days of the split is simply not in
+the window being summarised. The detector was effectively asking "is this
+station unusual *right now*, at the very end of test?", which is close to
+unrelated to "did this station drift at some point during test".
+
+Two compounding factors, both worth recording:
+
+1. **The corrected drift rate makes this much worse.** Rates are now
+   log-uniform over 0.01-2.0 σ/72h, median ≈0.14 σ/72h, while the bucket edges
+   sit at ±0.33 σ. A median drift episode does not move the station across a
+   single bucket boundary even if it *is* inside the window. The coarseness that
+   makes the ordinal privacy-safe also makes it blind to realistic drift
+   magnitudes.
+2. **One snapshot cannot see a trajectory.** This is the real constraint.
+
+### The fork this creates, which is the owner's call again
+
+The fix is to sample the bucket *over time* rather than once: at each step the
+node reports its trailing-72h bucket, and the server watches for one station's
+ordinal diverging from its neighbours' and staying diverged — a CUSUM over
+bucket disagreement, which is exactly the shape `cusum_score` already
+implements for spatial disagreement and the shape entry 15 argued drift needs.
+
+Whether that is within what was approved is genuinely arguable, and I am not
+going to decide it quietly:
+
+* **For:** the per-upload payload is unchanged — still one ordinal in 0-4, one
+  byte. A deployed federated system uploads every round, so a sequence of
+  ordinals over time is what the approved design *naturally produces*; the
+  snapshot I built is an artefact of evaluating on one fixed offline split.
+* **Against:** I told the owner, when implementing, that a bucket per hour
+  "would be a coarsely-quantised copy of the station's whole level trajectory,
+  which is materially more than what was approved". That is still true in
+  aggregate, and the honest privacy accounting is over the whole session, not
+  per message.
+
+So the recorded status of Objective-4-for-drift is: **still unsolved**, now for
+a precisely understood reason, with a candidate fix that needs an explicit
+decision about cumulative disclosure before it is built.
