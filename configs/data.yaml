@@ -253,8 +253,56 @@ meteo:
 # Secondary source: CPCB / India (CLAUDE.md §3.2) — Phase 3 ONLY.
 # ---------------------------------------------------------------------------
 cpcb:
-  enabled: false
+  enabled: true
   region: india
   # LOCKED (CLAUDE.md §2.6): no Validity equivalent exists. Every fault label on
   # CPCB-origin data is synthetic and is tagged label_source="synthetic".
   label_source: synthetic
+
+  # Reached through OpenAQ, which ingests CPCB as its India source. Two
+  # properties of that archive, both MEASURED rather than assumed, drive the
+  # settings below:
+  #
+  # 1. Coverage is discontinuous. Surveyed across 14 Delhi stations, 2023 and
+  #    2024 are absent entirely; 2018/2019/2021/2022 hold 100-280 days each;
+  #    2020 and 2025 hold ~310-360. There is no eight-year window to match
+  #    Catalonia's, and pretending otherwise would mean imputing over years.
+  # 2. The gases change unit partway through: NO2/SO2/CO are ug/m3 in 2020 and
+  #    ppb in 2025, while O3 and PM stay ug/m3 throughout. The conversion is
+  #    implemented (harmonize._convert_openaq_units) but has no overlapping
+  #    year to validate against, precisely because of (1).
+  #
+  # So the default window is 2025 onward: the densest coverage, contiguous, and
+  # a single unit regime that needs no conversion taken on trust. Widen it only
+  # knowing that the pre-2023 half relies on an unvalidated conversion.
+  year_from: 2025
+  year_to: 2026
+
+  # Delhi stations, chosen for NO2 plus the §6 feature pollutants and for
+  # coverage in both regimes. station_class is INFERRED from the station's name
+  # and siting, because CPCB publishes station types but OpenAQ does not carry
+  # them — it is a reasonable reading of each location, not an official
+  # classification, and anything grouped by station_class for India inherits
+  # that caveat.
+  stations:
+    - id: IN-OAQ-5622
+      name: NSIT Dwarka, Delhi
+      station_class: urban_background
+    - id: IN-OAQ-5626
+      name: DTU, New Delhi
+      station_class: urban_background
+    - id: IN-OAQ-5630
+      name: Shadipur, Delhi
+      station_class: urban_traffic
+    - id: IN-OAQ-5586
+      name: Sirifort, Delhi
+      station_class: urban_background
+    - id: IN-OAQ-5570
+      name: Aya Nagar, New Delhi
+      station_class: suburban_background
+    - id: IN-OAQ-5610
+      name: North Campus DU, Delhi
+      station_class: urban_background
+    - id: IN-OAQ-5627
+      name: CRRI Mathura Road, New Delhi
+      station_class: urban_traffic

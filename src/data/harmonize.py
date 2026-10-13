@@ -142,6 +142,9 @@ def harmonize_cpcb(
     df: pd.DataFrame,
     station_class_map: dict[str, str] | None = None,
     station_prefix: str = "IN-OAQ-",
+    *,
+    resample_hourly: bool = True,
+    min_samples_per_hour: int = 2,
 ) -> pd.DataFrame:
     """CPCB (via OpenAQ) raw schema -> common schema. Phase 3 (§3.2, §5.1).
 
@@ -212,11 +215,91 @@ def harmonize_cpcb(
             "failed to parse. Inspect the raw export before continuing."
         )
     out = _convert_openaq_units(out)
+    _check_basis_continuity(out)
     out = _canonicalise_units(out)
+    if resample_hourly:
+        out = _resample_cpcb_to_hourly(out, min_samples=min_samples_per_hour)
+    elif "unit_basis" in out.columns:
+        # Without the hourly grouping there is nowhere to resolve a station
+        # that reports one gas through both a mass and a ppb sensor, so the
+        # caller gets both rows and is told so rather than quietly handed a
+        # frame with duplicate timestamps of differing provenance.
+        if (out["unit_basis"] == _BASIS_CONVERTED).any():
+            log.warning(
+                "resample_hourly=False: mass and ppb-converted readings are "
+                "both present and NOT de-duplicated. Resolve before any "
+                "aggregation keyed on (station, pollutant, time)."
+            )
+        out = out.drop(columns=["unit_basis"])
     log.info("CPCB/OpenAQ: %s rows, %d station(s), pollutants %s",
              f"{len(out):,}", out["station_id"].nunique(),
              sorted(out["pollutant"].unique()))
     return _finalise(out)
+
+
+def _resample_cpcb_to_hourly(df: pd.DataFrame,
+                             min_samples: int = 2) -> pd.DataFrame:
+    """Average OpenAQ's 15-minute samples into the hourly means EEA supplies.
+
+    The archive is **quarter-hourly** — measured spacing is exactly 00:15:00
+    across the Delhi stations — while every downstream stage assumes hourly.
+    §6.1 builds an hourly index and checks contiguity, §6.4's lags are at t-1,
+    t-24 and t-168 hours, and EEA's own rows are `AveragingTime = hour`. Feeding
+    15-minute rows in would silently reindex four samples onto one hour and
+    keep whichever landed last, discarding three quarters of the data and
+    making India's effective sampling differ from Catalonia's.
+
+    ``min_samples`` is why this is a mean rather than a resample-and-hope: an
+    hour backed by a single 15-minute reading is noisier than one backed by
+    four, and that extra noise would land in the residual the detector
+    thresholds on. Requiring two is a compromise — it keeps hours with a
+    dropped sample while rejecting hours that are really one instantaneous
+    reading wearing an hour's clothes.
+    """
+    df = df.copy()
+    df["timestamp_utc"] = df["timestamp_utc"].dt.floor("h")
+
+    keys = ["station_id", "pollutant", "timestamp_utc"]
+
+    # A station can report the same gas through a mass sensor AND a ppb one
+    # (see `_convert_openaq_units`). Averaging across both would mix a measured
+    # value with a temperature-assuming conversion of a different instrument's
+    # reading, so keep only the best basis available for each hour and average
+    # within it.
+    if "unit_basis" in df.columns:
+        best = df.groupby(keys, observed=True, dropna=False)["unit_basis"] \
+                 .transform("min")
+        mixed = int((df["unit_basis"] != best).sum())
+        if mixed:
+            log.info("dropping %s reading(s) from a lower-preference unit basis "
+                     "where the same station-pollutant-hour also has a mass "
+                     "sensor", f"{mixed:,}")
+            df = df[df["unit_basis"] == best].copy()
+        df = df.drop(columns=["unit_basis"])
+
+    grouped = df.groupby(keys, observed=True, dropna=False)
+    out = grouped.agg(
+        concentration=("concentration", "mean"),
+        n_samples=("concentration", "size"),
+        unit=("unit", "first"),
+        region=("region", "first"),
+        label=("label", "first"),
+        label_source=("label_source", "first"),
+        station_class=("station_class", "first"),
+        validity=("validity", "first"),
+        verification=("verification", "first"),
+    ).reset_index()
+
+    thin = out["n_samples"] < min_samples
+    if (n := int(thin.sum())):
+        log.info("dropping %s hour(s) backed by fewer than %d sub-hourly "
+                 "sample(s) of %s total", f"{n:,}", min_samples, f"{len(out):,}")
+        out = out[~thin].copy()
+
+    per_hour = float(out["n_samples"].mean()) if len(out) else float("nan")
+    log.info("resampled %s quarter-hourly row(s) to %s hourly mean(s) "
+             "(%.2f samples per hour)", f"{len(df):,}", f"{len(out):,}", per_hour)
+    return out.drop(columns=["n_samples"])
 
 
 #: ppb -> ug/m3 at 25 C and 1013.25 hPa, the convention EEA and US EPA report
@@ -228,56 +311,106 @@ _PPB_TO_UGM3 = {
 }
 
 
+#: Provenance of a reading's unit, and the preference order used when one
+#: station reports the same pollutant through more than one sensor. Lower wins.
+_BASIS_MASS, _BASIS_CONVERTED = 0, 1
+
+
+def _check_basis_continuity(df: pd.DataFrame) -> None:
+    """Refuse to let one station's series straddle a change of sensor basis.
+
+    This is the failure that actually matters, and it is worth being precise
+    about why, because the obvious worry is the wrong one.
+
+    A *constant* unit error is nearly harmless here. §6.5 fits a z-score per
+    station on that station's own training window, so multiplying a whole
+    station-pollutant series by 1.88 is absorbed almost entirely by the
+    scaler — it survives only in physical-unit reporting, not in the
+    normalised residuals the detector thresholds on.
+
+    A unit change *partway through one station's series* is a different animal.
+    It is a genuine step discontinuity in the target, of a size no real
+    instrument produces, landing in whichever split happens to contain it. In
+    train it teaches the forecaster a phantom regime change; in test it is
+    indistinguishable from a catastrophic sensor fault and would be "detected"
+    as the project's headline result. Measured here, the NO2/SO2 basis changes
+    between 2021 and 2025 — conveniently inside the archive's 2023-2024 hole,
+    which is why a window on one side of it is clean.
+
+    So this warns rather than silently proceeding, and names what to narrow.
+    """
+    if "unit_basis" not in df.columns:
+        return
+    per = (df.groupby(["station_id", "pollutant"], observed=True)["unit_basis"]
+             .nunique())
+    straddling = per[per > 1]
+    if straddling.empty:
+        return
+    log.warning(
+        "%d station-pollutant series straddle a change of unit basis: %s. "
+        "That is a step discontinuity of ~1.9-2.6x in the middle of a series, "
+        "which no instrument produces and which the detector would flag as an "
+        "enormous fault. Narrow cpcb.year_from/year_to in configs/data.yaml to "
+        "stay on one side of it (2025 onward is a single basis).",
+        len(straddling),
+        [f"{s}/{p}" for s, p in straddling.index[:8].tolist()],
+    )
+
+
 def _convert_openaq_units(df: pd.DataFrame) -> pd.DataFrame:
-    """Bring OpenAQ's two different unit regimes onto the §3.1 canonical units.
+    """Bring OpenAQ readings onto the §3.1 canonical units, mass first.
 
-    The §3.1 unit trap, arriving from two directions at once. Measured across
-    the Delhi archive (locations 5586/5622/5626, 2020 vs 2025):
+    The §3.1 unit trap, in its most awkward form yet. A CPCB station exposes
+    **two sensors for the same gas**, confirmed against the OpenAQ v3 metadata
+    for location 5626:
 
-    ====== ============ ==========
-    param  2020         2025
-    ====== ============ ==========
-    NO2    ug/m3        **ppb**
-    SO2    ug/m3        **ppb**
-    CO     ug/m3        **ppb**
-    O3     ug/m3        ug/m3
-    PM10   ug/m3        ug/m3
-    PM2.5  ug/m3        ug/m3
-    ====== ============ ==========
+        no2  units=ug/m3  displayName="NO2 mass"
+        no2  units=ppb    displayName="NO2"
+        so2  units=ug/m3  displayName="SO2 mass"
+        so2  units=ppb    displayName="SO2"
 
-    **OpenAQ changed the reported unit for the gases partway through the
-    archive.** Concatenating the two regimes untouched would put a 2-3x step
-    change into the middle of the NO2 series — the project's target — which is
-    indistinguishable from an enormous sensor fault and would corrupt exactly
-    the experiment this data is for. So the conversion is not a nicety.
+    So a unit is a property of the *sensor*, not of the year — an earlier
+    reading of this data as "OpenAQ switched units in 2025" was wrong about the
+    mechanism. What actually varies is which of a station's sensors reported on
+    a given day, and both can report the same hour.
 
-    Three cases:
+    That makes `unit` load-bearing in a way it is easy to miss: any aggregation
+    keyed on (station, pollutant, hour) that ignores it will happily average a
+    ug/m3 value together with a ppb one and produce a number that means
+    nothing. `_resample_cpcb_to_hourly` therefore keys on the basis column this
+    function adds, and prefers mass.
 
-    * **NO2, SO2, O3 in ppb** convert with the standard molar factors above.
-    * **CO in ug/m3** converts to mg/m3, the §3.1 canonical unit for CO.
-    * **CO in ppb is dropped**, because the label is demonstrably wrong rather
-      than merely inconvenient: the 2025 median is 1.08 "ppb", which as ppb
-      would be 1.24 ug/m3, against 2010 ug/m3 for the same station in 2020.
-      Read as ppm it is 1.24 mg/m3, consistent. The archive means ppm and says
-      ppb, and guessing which on a per-row basis is not something to do
-      silently. CO is not in this project's target or feature set (§ data.yaml),
-      so dropping it costs nothing.
+    Handling, in preference order:
 
-    This cannot be validated against an overlap, because the archive has no
-    year in both regimes — 2023 and 2024 are missing entirely. The factors are
-    standard, but the absence of a cross-check is a real limitation and belongs
-    in any write-up that uses pre-2023 Indian data. Restricting to a single
-    regime (2025 onward) avoids the question altogether and is the recommended
-    default.
+    * **Mass readings pass through** (ug/m3 for everything, mg/m3 for CO after
+      a /1000). These need no assumption and are always preferred.
+    * **ppb readings convert** with the standard molar factors, and are marked
+      as converted so the resampler only falls back to them when a station has
+      no mass sensor for that pollutant and hour. The factors assume 25 C and
+      1013.25 hPa, which real Delhi air is not; preferring mass means that
+      assumption is usually unused rather than merely documented.
+    * **CO in ppb is dropped.** Its label is demonstrably wrong rather than
+      inconvenient: the 2025 median is 1.08 "ppb", which as ppb is 1.24 ug/m3
+      against 2010 ug/m3 for the same station in 2020, while as ppm it is
+      1.24 mg/m3 — consistent. The archive means ppm and says ppb. CO is
+      outside this project's target and feature set, so dropping it costs
+      nothing, and guessing per row would not be free.
+
+    One thing the mass preference does *not* fix: where a station has only a
+    ppb sensor, the converted value stands unvalidated, and a sanity check is
+    worth doing per pollutant. Converted SO2 came out at ~120 ug/m3 median
+    against ~22 from the same station's mass sensor — far above plausible Delhi
+    SO2 — which is the kind of discrepancy that motivated preferring mass in
+    the first place.
 
     `_canonicalise_units` still runs afterwards and still raises on anything
-    unresolved, so the EEA guard is untouched: CO in ug/m3 arriving from EEA
-    remains an error, because for EEA it is one.
+    unresolved, so the EEA guard is untouched.
     """
     df = df.copy()
     unit = (df["unit"].astype(str).str.strip().str.lower()
             .map(lambda u: _UNIT_ALIASES.get(u, u)))
     conc = pd.to_numeric(df["concentration"], errors="coerce")
+    df["unit_basis"] = _BASIS_MASS
 
     co_in_ug = (df["pollutant"] == "CO") & (unit == "ug/m3")
     if (n := int(co_in_ug.sum())):
@@ -290,7 +423,9 @@ def _convert_openaq_units(df: pd.DataFrame) -> pd.DataFrame:
         if (n := int(sel.sum())):
             df.loc[sel, "concentration"] = conc[sel] * factor
             df.loc[sel, "unit"] = "ug/m3"
-            log.info("converted %s %s reading(s) from ppb to ug/m3 (x%.4f)",
+            df.loc[sel, "unit_basis"] = _BASIS_CONVERTED
+            log.info("converted %s %s reading(s) from ppb to ug/m3 (x%.4f); "
+                     "used only where the station has no mass sensor",
                      f"{n:,}", pol, factor)
 
     co_in_ppb = (df["pollutant"] == "CO") & (unit == "ppb")
@@ -466,6 +601,96 @@ def load_harmonized(region: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def cpcb_station_classes() -> dict[str, str]:
+    """station_id -> station_class for the configured CPCB stations.
+
+    INFERRED, and labelled as such in `configs/data.yaml`: CPCB publishes
+    station types but OpenAQ does not carry them, so these are a reading of
+    each station's name and siting. Any India result grouped by station_class
+    inherits that caveat.
+    """
+    stations = (load_config("data").get("cpcb", {}) or {}).get("stations", [])
+    return {s["id"]: s.get("station_class", "unknown") for s in stations}
+
+
+def _main_cpcb(cfg: dict, args) -> None:
+    """Harmonize the downloaded CPCB/OpenAQ parquets into region 'india'.
+
+    Kept separate from the EEA path rather than folded into it, because the two
+    sources agree on almost nothing: CPCB has no Validity, no Verification, no
+    hourly averaging and a unit regime that changes mid-archive. Sharing one
+    code path would mean a cascade of `if region == "india"`, and §2.6 wants the
+    distinction visible rather than smoothed over.
+    """
+    raw_dir = data_paths()["raw"] / "cpcb"
+    parquets = sorted(raw_dir.glob("openaq_*.parquet"))
+    if not parquets:
+        raise SystemExit(
+            f"no CPCB parquets in {raw_dir}. Download first:\n"
+            "  python -m src.data.fetch_cpcb --discover --city Delhi\n"
+            "  python -m src.data.fetch_cpcb --download <ids...> "
+            "--year-from 2025 --year-to 2026"
+        )
+
+    raw = pd.concat([pd.read_parquet(p) for p in parquets], ignore_index=True)
+    log.info("read %s raw CPCB row(s) from %d parquet(s)",
+             f"{len(raw):,}", len(parquets))
+
+    cpcb_cfg = cfg.get("cpcb", {}) or {}
+    lo = args.cpcb_year_from or cpcb_cfg.get("year_from")
+    hi = args.cpcb_year_to or cpcb_cfg.get("year_to")
+
+    # Filter BEFORE harmonizing, not after. The window exists to keep each
+    # station on a single sensor basis (see `_check_basis_continuity`), so the
+    # continuity check has to run on what will actually be used.
+    if lo or hi:
+        year = pd.to_datetime(raw["datetime"], utc=True, errors="coerce",
+                              format="mixed").dt.year
+        keep = year.between(int(lo or 0), int(hi or 9999))
+        log.info("year filter %s-%s: keeping %s of %s raw row(s)",
+                 lo, hi, f"{int(keep.sum()):,}", f"{len(raw):,}")
+        raw = raw[keep].copy()
+    if raw.empty:
+        raise SystemExit(f"no CPCB rows in {lo}-{hi}")
+
+    df = harmonize_cpcb(raw, station_class_map=cpcb_station_classes())
+    if df.empty:
+        raise SystemExit("no CPCB rows survived harmonization")
+
+    region = args.region_name or cpcb_cfg.get("region", "india")
+    df["region"] = region
+
+    # LOCKED (§2.6, §5.3): this data carries no real fault labels, so it must
+    # never contribute to a real-fault metric. Assert rather than trust.
+    if (df["label_source"] != "synthetic").any():
+        raise ValueError(
+            "CPCB rows must all carry label_source='synthetic' (§2.6). "
+            f"Found: {sorted(df['label_source'].unique())}"
+        )
+    if df["label"].notna().any():
+        raise ValueError(
+            "CPCB rows must carry no real label — CPCB has no Validity "
+            "equivalent, so any label here would be invented (§2.6, §3.2)."
+        )
+
+    write_harmonized(df, region)
+
+    summary = (
+        df.groupby(["region", "station_id", "station_class", "label_source"])
+        .agg(rows=("concentration", "size"),
+             first=("timestamp_utc", "min"), last=("timestamp_utc", "max"),
+             pollutants=("pollutant", "nunique"))
+        .reset_index()
+    )
+    print("\n=== CPCB/OpenAQ harmonized (§8.3: grouped, never pooled) ===")
+    print(summary.to_string(index=False))
+    print(f"\nregion={region}  rows={len(df):,}  "
+          f"stations={df['station_id'].nunique()}")
+    print("label_source is 'synthetic' for every row: CPCB has no Validity "
+          "equivalent (§2.6). Faults are attached later by the rate-matched "
+          "injector at the rate measured from EEA (§5.5).")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--from-dir", default=None,
@@ -479,9 +704,24 @@ def main() -> None:
                     help="write under this region instead of eea.region — use "
                          "for an alternative node set so an existing build is "
                          "not overwritten (e.g. the 71-station scale-up)")
+    ap.add_argument("--cpcb", action="store_true",
+                    help="harmonize the CPCB/OpenAQ parquets under "
+                         "data/raw/cpcb instead of EEA (§3.2, Phase 3). This is "
+                         "a SECONDARY generalization set, never primary "
+                         "training or evaluation data (§2.6).")
+    ap.add_argument("--cpcb-year-from", type=int, default=None,
+                    help="restrict CPCB to one unit regime. OpenAQ switched the "
+                         "gases from ug/m3 to ppb partway through the archive, "
+                         "and 2025 onward is a single consistent regime with no "
+                         "conversion to take on trust.")
+    ap.add_argument("--cpcb-year-to", type=int, default=None)
     args = ap.parse_args()
 
     cfg = load_config("data")
+
+    if args.cpcb:
+        _main_cpcb(cfg, args)
+        return
 
     if args.raw_parquet:
         raw = pd.read_parquet(args.raw_parquet)
