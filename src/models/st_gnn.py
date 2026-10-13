@@ -30,6 +30,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from src.utils.device import resolve_device
 from src.utils.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -111,8 +112,11 @@ class STGNNHistory:
 def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarray,
                 X_val: np.ndarray, y_val: np.ndarray, epochs: int = 40,
                 lr: float = 1e-3, batch_size: int = 128, patience: int = 6,
-                grad_clip: float = 1.0) -> STGNNHistory:
+                grad_clip: float = 1.0,
+                device: str | None = "auto") -> STGNNHistory:
     """Joint training over every station at once — the centralised privilege."""
+    dev = resolve_device(device)
+    model.to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     history = STGNNHistory()
@@ -130,6 +134,7 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
         model.train()
         total, n = 0.0, 0
         for xb, yb in train_loader:
+            xb, yb = xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)
             opt.zero_grad()
             loss = loss_fn(model(xb), yb)
             loss.backward()
@@ -144,6 +149,7 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
         vtotal, vn = 0.0, 0
         with torch.no_grad():
             for xb, yb in val_loader:
+                xb, yb = xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)
                 vtotal += float(loss_fn(model(xb), yb).item()) * len(xb)
                 vn += len(xb)
         val = vtotal / max(vn, 1)
@@ -173,11 +179,14 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
 def predict(model: SpatioTemporalGNN, X: np.ndarray,
             batch_size: int = 256) -> np.ndarray:
     model.eval()
+    # Follow the model rather than re-resolving: after training it already
+    # lives wherever it was trained, and moving it back would be silent waste.
+    dev = next(model.parameters()).device
     out = []
     with torch.no_grad():
         for start in range(0, len(X), batch_size):
             batch = torch.from_numpy(
                 np.ascontiguousarray(X[start:start + batch_size], dtype=np.float32))
-            out.append(model(batch).cpu().numpy())
+            out.append(model(batch.to(dev)).cpu().numpy())
     return (np.concatenate(out, axis=0) if out
             else np.empty((0, 0, model.horizon), dtype=np.float32))

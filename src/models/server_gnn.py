@@ -31,6 +31,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from src.utils.device import resolve_device
 from src.utils.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -153,15 +154,21 @@ class GNNHistory:
 def train_reconstructor(model: NeighbourReconstructor, H_train: np.ndarray,
                         H_val: np.ndarray, epochs: int = 40, lr: float = 1e-3,
                         batch_size: int = 256,
-                        patience: int = 6) -> GNNHistory:
+                        patience: int = 6,
+                        device: str | None = "auto") -> GNNHistory:
     """Fit on TRAIN hidden states only; early stop on validation."""
+    dev = resolve_device(device)
+    model.to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     history = GNNHistory()
     best_state, stale = None, 0
 
     Xtr = torch.from_numpy(np.ascontiguousarray(H_train, dtype=np.float32))
-    Xva = torch.from_numpy(np.ascontiguousarray(H_val, dtype=np.float32))
+    # Validation is evaluated in one shot below, so it goes to the device once
+    # rather than per epoch. Train stays on the host and is moved per batch,
+    # which keeps a large hidden-state tensor out of 8 GB of VRAM.
+    Xva = torch.from_numpy(np.ascontiguousarray(H_val, dtype=np.float32)).to(dev)
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(Xtr), batch_size=batch_size, shuffle=True)
 
@@ -169,6 +176,7 @@ def train_reconstructor(model: NeighbourReconstructor, H_train: np.ndarray,
         model.train()
         total, n = 0.0, 0
         for (batch,) in loader:
+            batch = batch.to(dev, non_blocking=True)
             opt.zero_grad()
             recon, _ = model(batch)
             loss = loss_fn(recon, batch)
@@ -210,8 +218,11 @@ def spatial_disagreement(model: NeighbourReconstructor, H: np.ndarray,
     ``l2``       plain reconstruction error.
     """
     model.eval()
+    # Follow the model's own device rather than re-resolving, so inference
+    # lands wherever training left it.
+    dev = next(model.parameters()).device
     with torch.no_grad():
-        X = torch.from_numpy(np.ascontiguousarray(H, dtype=np.float32))
+        X = torch.from_numpy(np.ascontiguousarray(H, dtype=np.float32)).to(dev)
         recon, _ = model(X)
         if metric == "cosine":
             sim = torch.nn.functional.cosine_similarity(recon, X, dim=-1)

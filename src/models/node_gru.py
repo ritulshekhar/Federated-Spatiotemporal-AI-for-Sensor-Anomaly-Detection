@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from src.utils.device import resolve_device
 from src.utils.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -123,7 +124,7 @@ class TrainConfig:
     teacher_forcing_end: float = 0.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
-    device: str = "cpu"
+    device: str = "auto"       # auto | cpu | cuda -- see src/utils/device.py
     verbose_every: int = 5
 
 
@@ -159,7 +160,7 @@ class NodeTrainer:
         tcfg = cfg.get("train", {})
         self.cfg = TrainConfig(**{k: v for k, v in tcfg.items()
                                   if k in TrainConfig.__dataclass_fields__})
-        self.device = torch.device(self.cfg.device)
+        self.device = resolve_device(self.cfg.device)
         self.model.to(self.device)
         self.history = TrainHistory()
 

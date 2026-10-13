@@ -15,6 +15,12 @@ node_gru:
   embedding_size: 64
 
   train:
+    # auto | cpu | cuda. "auto" uses the GPU when torch reports one and falls
+    # back to CPU otherwise, so this file stays valid on a machine without a
+    # dGPU and the test suite needs no special casing. Everything in this
+    # project ran on CPU until 2026-10-13, not by choice but because the
+    # installed wheel was torch+cpu on a machine with an idle RTX 4060.
+    device: auto
     epochs: 40
     batch_size: 128
     lr: 0.001

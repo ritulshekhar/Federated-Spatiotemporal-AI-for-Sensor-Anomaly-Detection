@@ -94,6 +94,17 @@ def _fetch_chunk(lat: float, lon: float, start: str, end: str,
             time.sleep(delay)
             delay *= 2
             continue
+        if resp.status_code >= 500:
+            # A 5xx from a free public API means "try again later" just as much
+            # as a 429 does, and it was NOT retried before: a single 502 killed
+            # a 34-of-78-station fetch outright. Open-Meteo returns 502/503
+            # intermittently under load, so this is routine rather than
+            # exceptional.
+            log.warning("server error %d (%s..%s), waiting %.0fs",
+                        resp.status_code, start, end, delay)
+            time.sleep(delay)
+            delay *= 2
+            continue
         resp.raise_for_status()
         payload = resp.json()
         if "hourly" not in payload:

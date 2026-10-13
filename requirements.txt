@@ -10,6 +10,11 @@ requests>=2.31
 
 # --- modelling ---
 torch>=2.4             # GRU encoder-decoder (node tier) and, in Phase 2, the server GNN
+#   For GPU training install the CUDA wheel instead of the default CPU one:
+#     pip install torch==2.14.0+cu130 --index-url https://download.pytorch.org/whl/cu130
+#   Pick the cuXXX index matching the driver; cu130 suits a CUDA 13-era driver.
+#   Without it torch.cuda.is_available() is False and everything silently
+#   trains on CPU, which is how this project spent its first two weeks.
 scikit-learn>=1.5      # AUC-PR / precision-recall curves only; scalers are hand-rolled per §6.5
 scipy>=1.13
 
