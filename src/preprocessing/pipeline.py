@@ -242,6 +242,33 @@ def _prune_sparse_features(frame: pd.DataFrame, present: list[str], target: str,
     return kept
 
 
+def _rate_from_reference_region(cfg: dict, region: str) -> tuple[float, str] | None:
+    """The EEA-measured fault rate, for a region that has no real labels.
+
+    LOCKED by §5.5 and §2.7. CPCB has no Validity equivalent, so an Indian
+    build cannot measure its own rate — and must not default to an arbitrary
+    one, because a rate that differs between regions is a shortcut the model
+    can learn ("region X is likelier to be faulty") in place of a fault
+    signature. The rate therefore comes from the EEA region, unchanged.
+
+    Returns None when the EEA region's harmonized build is absent or itself
+    carries no real labels, so the caller can fall back and say so rather than
+    this inventing a number.
+    """
+    ref = cfg.get("eea", {}).get("region")
+    if not ref or ref == region:
+        return None
+    try:
+        ref_df = load_harmonized(ref)
+    except Exception as exc:  # noqa: BLE001 — absence is a normal outcome here
+        log.warning("cannot import an injection rate from region %r: %s", ref, exc)
+        return None
+    real = ref_df[ref_df["label_source"] == "real"]["label"].dropna()
+    if real.empty:
+        return None
+    return measured_rate_from(real), ref
+
+
 def run(region: str, inject_synthetic: bool = False,
         stations: list[str] | None = None, write: bool = True,
         variant: str | None = None) -> pd.DataFrame:
@@ -266,21 +293,38 @@ def run(region: str, inject_synthetic: bool = False,
     if inject_synthetic:
         real_rows = long_df[long_df["label_source"] == "real"]
         source = "real"
-        if real_rows.empty:
-            # The demo source is label_source="simulated". Its Validity flags
-            # are generated, so matching against them is a self-consistency
-            # check, not a real-rate match. Say so out loud.
-            real_rows = long_df
-            source = long_df["label_source"].iloc[0]
-            log.warning(
-                "no label_source='real' rows in region %r — matching the injection "
-                "rate against label_source=%r instead. This is NOT a real-rate "
-                "match (§5.5) and must not be reported as one.",
-                region, source,
-            )
-        synthetic_rate = measured_rate_from(real_rows["label"])
-        log.info("measured fault rate for region %r (label_source=%s): %.5f",
-                 region, source, synthetic_rate)
+        if real_rows.empty or real_rows["label"].dropna().empty:
+            # A region with no real labels at all. CPCB/India is the intended
+            # case (§2.6, §3.2: no Validity equivalent exists), and §5.5 says
+            # exactly what to do about it — take the rate from the EEA region
+            # rather than inventing one, because a region-specific rate would
+            # let the model learn "region -> fault likelihood" as a shortcut
+            # instead of learning fault signatures (§2.7).
+            borrowed = _rate_from_reference_region(cfg, region)
+            if borrowed is not None:
+                synthetic_rate, ref_region = borrowed
+                log.info(
+                    "region %r carries no real fault labels, so the injection "
+                    "rate is IMPORTED from region %r: %.5f (§5.5). It is not "
+                    "measured from %r and must not be described as such.",
+                    region, ref_region, synthetic_rate, region)
+            else:
+                # The demo source is label_source="simulated". Its Validity
+                # flags are generated, so matching against them is a
+                # self-consistency check, not a real-rate match. Say so.
+                real_rows = long_df
+                source = long_df["label_source"].iloc[0]
+                log.warning(
+                    "no label_source='real' rows in region %r and no reference "
+                    "region available — matching the injection rate against "
+                    "label_source=%r instead. This is NOT a real-rate match "
+                    "(§5.5) and must not be reported as one.", region, source)
+                synthetic_rate = measured_rate_from(real_rows["label"])
+        else:
+            synthetic_rate = measured_rate_from(real_rows["label"])
+        if synthetic_rate is not None and source == "real":
+            log.info("measured fault rate for region %r (label_source=%s): %.5f",
+                     region, source, synthetic_rate)
 
     meteo_enabled = cfg.get("meteo", {}).get("enabled", False)
 

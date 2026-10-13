@@ -343,3 +343,31 @@ def test_anomaly_table_requires_a_per_model_station_threshold():
     """A shared threshold is the §5.8 miscalibration failure mode."""
     with pytest.raises(PoolingError, match="no calibrated threshold"):
         anomaly_table(_records(), thresholds={("1_persistence", "ES0001A"): 0.5})
+
+
+def test_a_region_without_real_labels_imports_the_eea_rate():
+    """§5.5 / §2.7: India cannot measure its own rate and must not invent one.
+
+    A rate that differs between regions is a shortcut the model can learn
+    ("region X is likelier to be faulty") instead of a fault signature, so the
+    Indian injection rate has to be the EEA-measured one, unchanged.
+    """
+    from src.preprocessing.pipeline import _rate_from_reference_region
+    from src.utils.paths import load_config
+
+    got = _rate_from_reference_region(load_config("data"), "india")
+    if got is None:
+        pytest.skip("no harmonized EEA build on this machine to import from")
+    rate, ref_region = got
+    assert ref_region == "catalonia"
+    # The measured Catalonia rate, recorded in CLAUDE.md §2.1a as 0.02805.
+    assert rate == pytest.approx(0.02805, abs=5e-5)
+
+
+def test_the_reference_region_is_never_the_region_itself():
+    """Guards against a silent self-import that would report a fabricated rate."""
+    from src.preprocessing.pipeline import _rate_from_reference_region
+    from src.utils.paths import load_config
+
+    cfg = load_config("data")
+    assert _rate_from_reference_region(cfg, cfg["eea"]["region"]) is None
