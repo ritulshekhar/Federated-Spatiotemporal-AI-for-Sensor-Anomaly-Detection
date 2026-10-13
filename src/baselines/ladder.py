@@ -782,8 +782,59 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
         "hidden_state_upload_mb": round(hidden_mb, 3),
         "attention": reconstructor.attention().detach().cpu().numpy().round(3).tolist(),
         "station_order": station_ids,
+        "drift_identification": _drift_identification(
+            stations, clients, adjacency, station_ids),
     }
     return pd.concat(records, ignore_index=True), thresholds, history
+
+
+
+def _drift_identification(stations, clients, adjacency, station_ids) -> dict:
+    """§2.4a: station-level drift identification from uploaded level buckets.
+
+    Separate from the per-reading anomaly table on purpose. §2.4a permits one
+    ordinal per station per upload, so this names *stations* whose calibration
+    has diverged from their neighbourhood, not readings. Reporting it as
+    per-reading drift recall would overclaim what the channel can carry.
+
+    Ground truth is "did this station's test split receive any injected drift
+    episode", which is what a station-level claim can honestly be scored
+    against.
+    """
+    from src.models.server_gnn import flag_drifting_stations, level_disagreement
+
+    buckets = {st.station_id: client.level_bucket("test")
+               for st, client in zip(stations, clients)}
+    gaps = level_disagreement(buckets, adjacency, station_ids)
+    flags = flag_drifting_stations(buckets, adjacency, station_ids)
+
+    truth = {}
+    for st in stations:
+        ft = st.splits["test"].target_fault_type
+        truth[st.station_id] = bool(
+            ft is not None and (np.asarray(ft) == "drift").any())
+
+    tp = sum(1 for s in station_ids if flags.get(s) and truth.get(s))
+    fp = sum(1 for s in station_ids if flags.get(s) and not truth.get(s))
+    fn = sum(1 for s in station_ids if not flags.get(s) and truth.get(s))
+    undecidable = sum(1 for s in station_ids if not np.isfinite(gaps.get(s, np.nan)))
+
+    log.info("drift identification (§2.4a, station level): %d flagged, "
+             "%d true positive, %d false positive, %d missed, %d undecidable "
+             "for want of neighbours", tp + fp, tp, fp, fn, undecidable)
+    return {
+        "buckets": {s: (None if buckets.get(s) is None else int(buckets[s]))
+                    for s in station_ids},
+        "disagreement_steps": {s: (None if not np.isfinite(gaps.get(s, np.nan))
+                                   else round(float(gaps[s]), 3))
+                               for s in station_ids},
+        "flagged": {s: bool(flags.get(s, False)) for s in station_ids},
+        "had_injected_drift": {s: bool(truth.get(s, False)) for s in station_ids},
+        "true_positive": tp, "false_positive": fp, "missed": fn,
+        "undecidable_no_neighbours": undecidable,
+        "scope": ("station-level identification, not per-reading recall; "
+                  "§2.4a permits one ordinal per station per upload"),
+    }
 
 
 # ---------------------------------------------------------------------------

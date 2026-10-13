@@ -238,3 +238,78 @@ def test_aggregate_refuses_an_empty_round():
     server = FederatedServer({"w": torch.zeros(1)})
     with pytest.raises(ValueError, match="no uploads"):
         server.aggregate([])
+
+
+# ---------------------------------------------------------------------------
+# §2.4a — the level bucket, and what it must not become
+# ---------------------------------------------------------------------------
+def test_level_bucket_is_permitted_and_costs_one_byte():
+    u = check_upload(Upload(station_id="ES0001A", region="catalonia", n_samples=5,
+                            gru_weight_update={"w": torch.zeros(3)},
+                            level_bucket=4))
+    assert u.level_bucket == 4
+    # The ordinal must stay cheap: §2.4a's defence is that it is coarse.
+    plain = Upload(station_id="ES0001A", region="catalonia", n_samples=5,
+                   gru_weight_update={"w": torch.zeros(3)})
+    assert u.payload_bytes() - plain.payload_bytes() == 1
+
+
+def test_level_bucket_discloses_no_absolute_scale():
+    """The §2.4a defence, as a test rather than a claim in a comment.
+
+    Two stations with wildly different physical levels but the same shape must
+    produce the same bucket, because the bucket is computed after per-station
+    z-scoring. If this ever fails, the field has started leaking scale and the
+    amendment's justification no longer holds.
+    """
+    from src.preprocessing.normalize import level_bucket
+
+    shape = np.concatenate([np.zeros(72), np.full(72, 1.5)])
+    quiet_city = shape          # already normalised, by construction
+    filthy_city = shape         # identical after its own z-scoring
+    assert level_bucket(quiet_city) == level_bucket(filthy_city)
+
+
+@pytest.mark.parametrize("sigma,expected", [(-3.0, 0), (-0.6, 1), (0.0, 2),
+                                            (0.6, 3), (3.0, 4)])
+def test_level_bucket_is_monotone_in_level(sigma, expected):
+    from src.preprocessing.normalize import level_bucket
+    assert level_bucket(np.full(100, sigma)) == expected
+
+
+def test_absent_data_reports_normal_not_fault():
+    """A station with nothing recent is saying "nothing unusual", not "faulty"."""
+    from src.preprocessing.normalize import LEVEL_BUCKET_NORMAL, level_bucket
+    assert level_bucket(np.full(50, np.nan)) == LEVEL_BUCKET_NORMAL
+    assert level_bucket(np.array([])) == LEVEL_BUCKET_NORMAL
+
+
+def test_a_regional_episode_flags_nobody():
+    """The Gupchup (2019) control, at station level.
+
+    Every station elevated together is a real pollution episode. Calling that
+    a fault is the 45%-false-positive failure §8.2 bans recall-only metrics
+    over, so it must come out empty.
+    """
+    from src.models.server_gnn import flag_drifting_stations
+    ids = ["A", "B", "C", "D", "E"]
+    adj = ~np.eye(5, dtype=bool)
+    assert not any(flag_drifting_stations({s: 4 for s in ids}, adj, ids).values())
+
+
+def test_one_station_diverging_from_its_neighbours_is_flagged():
+    from src.models.server_gnn import flag_drifting_stations
+    ids = ["A", "B", "C", "D", "E"]
+    adj = ~np.eye(5, dtype=bool)
+    flags = flag_drifting_stations({"A": 4, "B": 2, "C": 2, "D": 2, "E": 2}, adj, ids)
+    assert flags["A"] and not any(flags[s] for s in ("B", "C", "D", "E"))
+
+
+def test_a_station_without_neighbours_is_never_flagged():
+    """Absence of evidence is not evidence of drift (cf. spatial_agreement)."""
+    from src.models.server_gnn import flag_drifting_stations, level_disagreement
+    ids = ["A", "B", "C"]
+    isolated = np.zeros((3, 3), dtype=bool)
+    buckets = {"A": 4, "B": 2, "C": 2}
+    assert not any(flag_drifting_stations(buckets, isolated, ids).values())
+    assert np.isnan(level_disagreement(buckets, isolated, ids)["A"])

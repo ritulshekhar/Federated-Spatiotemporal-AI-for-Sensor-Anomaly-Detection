@@ -22,7 +22,10 @@ import numpy as np
 import torch
 
 from src.models.node_gru import NodeTrainer
-from src.preprocessing.normalize import contains_normalization_statistics
+from src.preprocessing.normalize import (
+    LEVEL_BUCKET_NORMAL, contains_normalization_statistics,
+    level_bucket as _level_bucket,
+)
 from src.utils.logging_setup import get_logger
 from src.utils.paths import load_config
 
@@ -43,6 +46,12 @@ class Upload:
     #: Only populated once the server GNN exists (rung 6). Rung 5 has no
     #: spatial model, so sending hidden states would be comms cost for nothing.
     encoder_hidden_state: np.ndarray | None = None
+    #: §2.4a — a 5-level ordinal of this station's own level deviation, on
+    #: already-normalised data. The ONLY level information permitted to leave a
+    #: node, and the only signal in the uploaded set that drift can move: a
+    #: drifting sensor stays easy to forecast, so the residual never sees it
+    #: (CONTEXT.md entry 15). None means the node did not compute one.
+    level_bucket: int | None = None
     local_train_loss: float = float("nan")
 
     def payload_bytes(self) -> int:
@@ -51,6 +60,8 @@ class Upload:
                     for v in self.gru_weight_update.values())
         if self.encoder_hidden_state is not None:
             total += int(self.encoder_hidden_state.nbytes)
+        if self.level_bucket is not None:
+            total += 1          # an ordinal in 0..4 fits in one byte (§2.4a)
         return total
 
 
@@ -138,8 +149,26 @@ class FederatedClient:
             region=self.region,
             n_samples=self.n_samples,
             gru_weight_update=self.trainer.get_weights(),
+            level_bucket=self.level_bucket(),
             local_train_loss=float(loss),
         ))
+
+    def level_bucket(self, split: str = "val") -> int:
+        """This station's §2.4a level bucket, computed locally and uploaded.
+
+        Reads the normalised target straight out of the station's own windows,
+        so the scaler is never touched and never travels. ``split`` is the data
+        the node is currently running on — val during training rounds, test at
+        evaluation time — because a bucket computed on the training window
+        would by construction always say "normal".
+        """
+        y = self.y(split)
+        if y is None or len(y) == 0:
+            return LEVEL_BUCKET_NORMAL
+        # y is (windows, horizon) in normalised units; the 1h-ahead column is
+        # the most recent real level the node has.
+        series = np.asarray(y)[:, 0] if np.asarray(y).ndim > 1 else np.asarray(y)
+        return _level_bucket(series)
 
     def evaluate(self, global_weights: dict[str, torch.Tensor],
                  split: str = "val") -> float:

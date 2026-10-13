@@ -103,6 +103,43 @@ should change, flag it explicitly rather than silently deviating.
 4. **The node never transmits raw readings, its local normalization statistics, or (for the spatial
    model) more than the hidden state / embedding needed by the server.** This is the entire privacy
    contract of the project — any code path that would violate it needs to be flagged, not written.
+   **Narrowed 2026-10-13 — see 4a.** The prohibition on raw readings and on normalization
+   statistics is unchanged and remains absolute. What changed is the "more than" clause.
+
+4a. **One additional field may leave the node: `level_bucket`, a 5-level ordinal summary of the
+   station's own level deviation, computed on already-normalized data.** AMENDED 2026-10-13 by the
+   project owner, who was asked explicitly and chose the coarse-bucket option over a continuous
+   scalar and over refusing outright.
+
+   *Why this was needed.* CONTEXT.md entry 15 established that slow drift is invisible to a node's
+   forecast residual, and not as a tuning problem: a sensor that drifts slowly stays *easy to
+   predict*, so the residual the whole decision layer is built on shrinks rather than grows. No
+   amount of server-side work over residuals or embeddings can recover a signal the residual never
+   contained. Drift recall sat at 0.000 at the alert operating point for every rung, including the
+   centralised model with full raw access. Either a drift-sensitive quantity crosses the boundary,
+   or drift is permanently out of reach.
+
+   *Why it is defensible, stated precisely rather than waved at.* The bucket is computed **after**
+   §6.5 z-scoring, on the station's own normalized series. It therefore says "this station
+   currently sits roughly one of its own standard deviations above its own training mean" and
+   nothing at all about what that is in µg/m³. The scaler never leaves the node, so absolute level
+   and absolute scale are both unrecoverable from an integer in 0–4. It is strictly coarser than
+   the `encoder_hidden_state` already permitted, which is a continuous float vector encoding the
+   same window.
+
+   *What it costs, not buried.* The §1.2 novelty claim is "cross-node spatial reasoning under a
+   federated constraint", and the constraint is now one field wider than it was. Any write-up must
+   describe the uploaded set as *weights, encoder hidden states, and a coarse ordinal level
+   summary* — not as "hidden states only". A reviewer is entitled to ask whether the ordinal leaks
+   anything over many rounds; the honest answer is that it leaks the shape of the station's own
+   normalized level trajectory, which is information about its *behaviour over time*, not about its
+   measurements.
+
+   *The mechanism it enables.* Stations in a region share weather and pollution regimes, so a
+   genuine episode lifts every station's bucket together. One station's bucket rising while its
+   neighbours stay put is drift — which is exactly §7.4's spatial-agreement logic applied to level
+   instead of residual. Enforced in code: `configs/federation.yaml` `privacy:` lists it, and
+   `check_upload` runs on every upload, every round.
 5. **The citation replacing "Veera Brahmam & Gopikrishnan (2024)" is Alduais, Abdullah & Jamil
    (2019), "RDCM."** The former was retracted by Elsevier (Sept 2025) for plagiarizing the latter.
    Never re-add the retracted citation.

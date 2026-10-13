@@ -240,3 +240,67 @@ def spatial_agreement(embedding: np.ndarray, neighbour_embeddings: np.ndarray,
     if metric == "l2":
         return float(-np.linalg.norm(embedding - centre))
     raise ValueError(f"unknown metric {metric!r}")
+
+
+# ---------------------------------------------------------------------------
+# §2.4a — drift identification from uploaded level buckets
+# ---------------------------------------------------------------------------
+def level_disagreement(buckets: dict[str, int], adjacency: np.ndarray,
+                       station_ids: list[str],
+                       min_neighbours: int = 2) -> dict[str, float]:
+    """How far each station's level bucket sits from its neighbours' consensus.
+
+    The §7.4 spatial-agreement argument applied to *level* instead of residual,
+    and the only route to drift that exists: a slowly drifting sensor stays
+    easy to forecast, so its residual never grows (CONTEXT.md entry 15), and no
+    server-side work can recover a signal the residual never carried.
+
+    Stations in a region share weather and pollution regimes, so a genuine
+    episode lifts every bucket together and the disagreement stays near zero.
+    One station's bucket rising while its neighbours hold is the signature of
+    that station's own calibration moving.
+
+    Returns ``|own - median(neighbours)|`` in bucket steps, or NaN where a
+    station has too few neighbours to arbitrate — the same convention
+    ``spatial_agreement`` uses, and for the same reason: a station with no
+    neighbours has no evidence either way, which is not the same as innocent.
+
+    **Scope, stated because it is easy to overclaim.** §2.4a permits ONE
+    ordinal per station per upload, so this identifies *stations* whose
+    calibration has diverged, not individual readings. That is the honest
+    deployment artefact anyway — drift is a station condition, and §8.2's
+    "review" operating point exists precisely to feed a maintenance list — but
+    it means per-reading drift recall remains unobtainable through this
+    channel, and it must not be reported as though it were.
+    """
+    index = {s: i for i, s in enumerate(station_ids)}
+    out: dict[str, float] = {}
+    for station, own in buckets.items():
+        i = index.get(station)
+        if i is None or own is None:
+            out[station] = float("nan")
+            continue
+        neighbours = [buckets.get(station_ids[j]) for j in range(len(station_ids))
+                      if j != i and adjacency[i, j]]
+        neighbours = [b for b in neighbours if b is not None]
+        if len(neighbours) < min_neighbours:
+            out[station] = float("nan")
+            continue
+        out[station] = abs(float(own) - float(np.median(neighbours)))
+    return out
+
+
+def flag_drifting_stations(buckets: dict[str, int], adjacency: np.ndarray,
+                           station_ids: list[str],
+                           min_steps: float = 1.0) -> dict[str, bool]:
+    """Which stations to put on a calibration-review list.
+
+    ``min_steps`` is in bucket steps. One full step is deliberately coarse: the
+    buckets are ~0.33-1.0 sigma wide, so a station must have moved roughly a
+    third of its own standard deviation away from its neighbourhood consensus
+    before it is named. A station with too few neighbours is NOT flagged —
+    absence of evidence is not evidence of drift, and flagging it would just
+    manufacture false positives at the edge of the network.
+    """
+    gaps = level_disagreement(buckets, adjacency, station_ids)
+    return {s: bool(np.isfinite(g) and g >= min_steps) for s, g in gaps.items()}

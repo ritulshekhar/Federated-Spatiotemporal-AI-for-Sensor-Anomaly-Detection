@@ -59,6 +59,21 @@ privacy:
     - encoder_hidden_state
     - n_samples            # scalar count, needed for reporting only, never for
                            # aggregation weighting under region_first
+    # AMENDED 2026-10-13 by the project owner, after being asked explicitly.
+    # See CLAUDE.md §2.4a for the decision and its reasoning.
+    #
+    # A 5-level ORDINAL bucket of the station's own level deviation, measured
+    # on ALREADY-NORMALISED data. Entry 15 established that a node's forecast
+    # residual cannot see drift at all -- a slowly drifting sensor stays easy
+    # to predict -- so no amount of server-side cleverness over residuals will
+    # ever reach it. This is the smallest signal that can.
+    #
+    # Why it is defensible: the bucket is computed after §6.5 z-scoring, so it
+    # says "this station currently sits about one of its own standard
+    # deviations above its own training mean" and nothing whatsoever about what
+    # that means in ug/m3. The scaler stays local; absolute scale is not
+    # recoverable from an ordinal in 0..4.
+    - level_bucket
   never_transmitted:
     - raw_readings
     - normalization_statistics

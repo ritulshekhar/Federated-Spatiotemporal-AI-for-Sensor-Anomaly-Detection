@@ -194,3 +194,45 @@ def contains_normalization_statistics(payload: object) -> bool:
     if isinstance(payload, (list, tuple, set)):
         return any(contains_normalization_statistics(v) for v in payload)
     return False
+
+
+# ---------------------------------------------------------------------------
+# §2.4a — the one summary a node may upload about its own level
+# ---------------------------------------------------------------------------
+#: Bucket edges in units of the station's own training standard deviation.
+#: Five levels: well below / below / normal / above / well above. Coarse on
+#: purpose — the project owner chose an ordinal over a continuous scalar
+#: precisely so this cannot act as a fine-grained channel.
+LEVEL_BUCKET_EDGES: tuple[float, ...] = (-1.0, -0.33, 0.33, 1.0)
+LEVEL_BUCKET_NORMAL = 2          # the index meaning "no unusual level"
+N_LEVEL_BUCKETS = len(LEVEL_BUCKET_EDGES) + 1
+
+
+def level_bucket(normalised_target: "np.ndarray", window: int = 72) -> int:
+    """Bucket a station's recent normalised level into one of five ordinals.
+
+    LOCKED by §2.4a. The input is **already z-scored** against this station's
+    own training window (§6.5), which is the whole reason this is safe to send:
+    the output says "about one of my own standard deviations above my own
+    training mean" and carries no information about what that is in physical
+    units. The scaler stays on the node.
+
+    ``window`` is 72 hours to match the drift episode floor in
+    ``preprocessing/fault_labels.py`` — a drift episode shorter than that is
+    indistinguishable from a bias step, so averaging over less would mostly
+    measure weather.
+
+    Returns ``LEVEL_BUCKET_NORMAL`` for an all-NaN or empty input rather than
+    raising, because a station with no recent valid data is reporting "nothing
+    unusual", not a fault. Guessing otherwise would inject false positives.
+    """
+    import numpy as np
+
+    arr = np.asarray(normalised_target, dtype=float).ravel()
+    if arr.size == 0:
+        return LEVEL_BUCKET_NORMAL
+    recent = arr[-window:] if arr.size > window else arr
+    if not np.isfinite(recent).any():
+        return LEVEL_BUCKET_NORMAL
+    return int(np.searchsorted(LEVEL_BUCKET_EDGES,
+                               float(np.nanmean(recent)), side="right"))
