@@ -92,7 +92,16 @@ def load_station(station_id: str, variant: str = "") -> StationData:
     )
 
 
-def load_region(region: str, variant: str = "") -> list[StationData]:
+def load_region(region: str, variant: str = "",
+                max_stations: int | None = None) -> list[StationData]:
+    """Load a region's preprocessed stations.
+
+    ``max_stations`` truncates the station LIST before any window array is
+    read, which is the whole point: loading 69 stations and then discarding 39
+    of them still pays the full peak memory, and that peak is what killed two
+    ~18-hour runs. Sorted first so the subset is reproducible rather than
+    manifest order.
+    """
     manifest_path = variant_root("processed", variant) / f"run_manifest_{region}.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
@@ -102,6 +111,10 @@ def load_region(region: str, variant: str = "") -> list[StationData]:
             + " first."
         )
     ids = json.loads(manifest_path.read_text(encoding="utf-8"))["stations_processed"]
+    if max_stations is not None and len(ids) > max_stations:
+        ids = sorted(ids)[:max_stations]
+        log.info("loading only %d of the region's stations: %s ... %s",
+                 len(ids), ids[0], ids[-1])
     return [load_station(sid, variant=variant) for sid in ids]
 
 
@@ -851,18 +864,12 @@ def run_phase1(region: str, rungs: tuple[int, ...] = (1, 2, 3),
     dec = model_cfg["decision_layer"]["residual_threshold"]
     seed = model_cfg.get("seed", 1337)
 
-    stations = load_region(region, variant=variant)
+    stations = load_region(region, variant=variant, max_stations=max_stations)
     log.info("loaded %d station(s) for region %r (variant %r)", len(stations),
              region, variant or "clean")
 
-    if max_stations is not None and len(stations) > max_stations:
-        # Sorted first, so "the first 30" is a reproducible set rather than
-        # whatever order the filesystem happened to yield. The 69-station run
-        # exhausted memory; this is how a smaller node set is taken WITHOUT
-        # rebuilding the preprocessed data, which is intact and expensive.
-        stations = sorted(stations, key=lambda s: s.station_id)[:max_stations]
-        log.info("restricted to the first %d station(s) by id: %s ... %s",
-                 len(stations), stations[0].station_id, stations[-1].station_id)
+    # (the node set was already narrowed in load_region, before any
+    # window array was read — see its docstring)
 
     sc = model_cfg["decision_layer"].get("score", {})
     score_kwargs = {
