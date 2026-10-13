@@ -282,6 +282,28 @@ def coordinates() -> dict[str, tuple[float, float]]:
     }
 
 
+def cpcb_coordinates() -> dict[str, tuple[float, float]]:
+    """``station_id -> (lat, lon)`` for CPCB stations, if India was harmonized.
+
+    Kept separate from `coordinates()` rather than merged into it. That
+    function feeds EEA-only paths — `build_adjacency`, the privacy guard's
+    station list, `verify_configured_stations` — and quietly growing it with
+    Indian stations would change what those see. Callers that genuinely want
+    both ask for both; §2.6 wants the two node sets distinguishable, not
+    silently unioned.
+    """
+    import pandas as pd
+
+    from src.data.harmonize import CPCB_COORDS_CSV
+
+    path = data_paths()["raw"] / CPCB_COORDS_CSV
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    return {str(r.station_id): (float(r.latitude), float(r.longitude))
+            for r in df.itertuples()}
+
+
 def verify_configured_stations() -> dict[str, list[str]]:
     """Diff configs/data.yaml against the EEA registry.
 

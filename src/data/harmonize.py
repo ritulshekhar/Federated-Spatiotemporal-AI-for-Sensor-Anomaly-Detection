@@ -601,6 +601,42 @@ def load_harmonized(region: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+CPCB_COORDS_CSV = "cpcb_station_coords.csv"
+
+
+def _write_cpcb_coordinates(raw: pd.DataFrame,
+                            station_prefix: str = "IN-OAQ-") -> Path:
+    """Record each CPCB station's coordinates from the raw archive rows.
+
+    The OpenAQ archive carries ``lat``/``lon`` on every row while the §5.1
+    common schema has no column for them, so they would otherwise be lost
+    between harmonization and the stages that need them: ERA5 meteorology is
+    sampled at station coordinates, and §7.2's graph is built from spatial
+    proximity. Derived from the data rather than typed into config, so a
+    station cannot end up with coordinates that disagree with its readings.
+
+    The median is used rather than the first row because a handful of archive
+    rows carry slightly different coordinates for the same station, presumably
+    from re-siting or re-survey; the median is stable against a few outliers.
+    """
+    if not {"lat", "lon", "location_id"} <= set(raw.columns):
+        log.warning("raw CPCB frame has no lat/lon columns; skipping the "
+                    "coordinate export. Meteorology and the graph will be "
+                    "unavailable for these stations.")
+        return data_paths()["raw"] / CPCB_COORDS_CSV
+
+    coords = (raw.assign(station_id=station_prefix
+                         + raw["location_id"].astype(str))
+                 .groupby("station_id")[["lat", "lon"]].median()
+                 .reset_index()
+                 .rename(columns={"lat": "latitude", "lon": "longitude"}))
+    out = data_paths()["raw"] / CPCB_COORDS_CSV
+    out.parent.mkdir(parents=True, exist_ok=True)
+    coords.to_csv(out, index=False)
+    log.info("wrote coordinates for %d CPCB station(s) -> %s", len(coords), out)
+    return out
+
+
 def cpcb_station_classes() -> dict[str, str]:
     """station_id -> station_class for the configured CPCB stations.
 
@@ -652,6 +688,12 @@ def _main_cpcb(cfg: dict, args) -> None:
         raw = raw[keep].copy()
     if raw.empty:
         raise SystemExit(f"no CPCB rows in {lo}-{hi}")
+
+    # Capture coordinates before harmonizing: the archive carries lat/lon per
+    # row but the common schema has no place for them, and §6/§7 need them for
+    # meteorology and for the graph. Taken from the data itself rather than
+    # written into config by hand, so they cannot drift from the readings.
+    _write_cpcb_coordinates(raw)
 
     df = harmonize_cpcb(raw, station_class_map=cpcb_station_classes())
     if df.empty:

@@ -146,6 +146,16 @@ def fetch_all(start: str, end: str, pause_s: float = 1.0) -> dict[str, Path]:
         )
 
     coords = coordinates()
+    # §5: India's stations are not in the EEA registry, so their coordinates
+    # come from the CPCB archive itself (see harmonize._write_cpcb_coordinates).
+    # Merged only here, where the job is "fetch met data for every station we
+    # have", never into `coordinates()` itself — that feeds EEA-only paths.
+    if cfg.get("cpcb", {}).get("enabled", False):
+        from src.data.station_metadata import cpcb_coordinates
+        india = cpcb_coordinates()
+        if india:
+            log.info("including %d CPCB station(s) in the met fetch", len(india))
+            coords = {**coords, **india}
     if not coords:
         raise RuntimeError(
             "no station coordinates available. Run "
