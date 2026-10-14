@@ -313,3 +313,68 @@ def test_a_station_without_neighbours_is_never_flagged():
     buckets = {"A": 4, "B": 2, "C": 2}
     assert not any(flag_drifting_stations(buckets, isolated, ids).values())
     assert np.isnan(level_disagreement(buckets, isolated, ids)["A"])
+
+
+# ---------------------------------------------------------------------------
+# Masked alignment — the 69-station limit
+# ---------------------------------------------------------------------------
+def test_masked_stgnn_ignores_absent_stations():
+    """An absent station must not be read as one sitting at its own average.
+
+    Features are z-scored, so the zero fill IS each station's training mean.
+    Without the mask the model treats "missing" as "perfectly normal", which is
+    the most dangerous possible default for a fault detector.
+    """
+    from src.models.st_gnn import SpatioTemporalGNN
+
+    torch.manual_seed(0)
+    N, B, L, F = 4, 3, 6, 5
+    adj = ~np.eye(N, dtype=bool)
+    model = SpatioTemporalGNN(n_features=F, adjacency=adj, hidden_size=8,
+                              horizon=2, target_index=0).eval()
+
+    X = torch.randn(B, N, L, F)
+    mask = torch.ones(B, N, dtype=torch.bool)
+    mask[:, 3] = False                      # station 3 never reported
+
+    with torch.no_grad():
+        base = model(X, mask)
+        # Whatever station 3's zero-fill happens to be, changing it must not
+        # move the other stations' forecasts while it is masked out.
+        X2 = X.clone()
+        X2[:, 3] = torch.randn(B, L, F) * 10
+        moved = model(X2, mask)
+
+    assert torch.allclose(base[:, :3], moved[:, :3], atol=1e-5), (
+        "a masked-out station still influenced its neighbours' forecasts")
+
+
+def test_masked_alignment_keeps_hours_the_strict_rule_would_drop():
+    """The whole point: a station missing one hour must not delete that hour."""
+    from src.baselines.ladder import _aligned_windows
+
+    class _WS:
+        def __init__(self, t0, n_feat=3, L=4, H=2):
+            self.t0 = np.array(t0, dtype="datetime64[ns]")
+            n = len(t0)
+            self.X = np.ones((n, L, n_feat), dtype=np.float32)
+            self.y = np.ones((n, H), dtype=np.float32)
+            self.feature_columns = [f"f{i}" for i in range(n_feat)]
+
+    class _St:
+        def __init__(self, sid, hours):
+            self.station_id = sid
+            base = np.datetime64("2024-01-01T00")
+            self.splits = {"train": _WS([base + np.timedelta64(h, "h") for h in hours])}
+
+    stations = [_St("A", [0, 1, 2, 3]), _St("B", [0, 1, 2, 3]),
+                _St("C", [0, 1, 3])]          # C is missing hour 2
+    idx = {s.station_id: np.arange(3) for s in stations}
+
+    X, y, common, pos, mask = _aligned_windows(stations, idx, "train",
+                                               min_fraction=0.6)
+    assert len(common) == 4, "the strict rule would have dropped hour 2"
+    assert mask.shape == (4, 3)
+    assert mask[:, 2].sum() == 3 and not mask[2, 2], "C should be absent at hour 2"
+    assert (X[2, 2] == 0).all(), "an absent station must be zero-filled"
+    assert pos["C"][2] == -1, "an absent station needs no scatter position"

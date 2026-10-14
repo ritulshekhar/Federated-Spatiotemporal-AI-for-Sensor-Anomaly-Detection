@@ -67,18 +67,39 @@ class SpatioTemporalGNN(nn.Module):
         self.decoder = nn.GRU(1, hidden_size, batch_first=True)
         self.head = nn.Linear(hidden_size, 1)
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """``X`` is (batch, n_stations, input_hours, n_features) -> (batch, n_stations, horizon)."""
+    def forward(self, X: torch.Tensor,
+                mask: torch.Tensor | None = None) -> torch.Tensor:
+        """``X`` is (batch, n_stations, input_hours, n_features) -> (batch, n_stations, horizon).
+
+        ``mask`` is (batch, n_stations) and marks which stations actually
+        reported that hour. Absent stations arrive zero-filled, and zero is NOT
+        neutral: the features are z-scored, so an unmasked model reads an
+        absent station as one sitting exactly at its own average. Their hidden
+        states are therefore zeroed before mixing and the adjacency is
+        renormalised per sample, so every station averages over the neighbours
+        that were actually present rather than over a constant.
+        """
         B, N, L, F = X.shape
 
         _, h = self.encoder(X.reshape(B * N, L, F))
         h = h[-1].reshape(B, N, self.hidden_size)
 
+        if mask is not None:
+            m = mask.to(h.dtype)
+            h = h * m.unsqueeze(-1)
+            # Row-renormalise the adjacency against who is present, so an hour
+            # with half the network missing is not quietly scaled down.
+            w = torch.einsum("ij,bj->bi", self.adj, m).clamp_min(1e-6)
+
         # Spatial mixing. Residual connections so a station can keep its own
         # representation when its neighbours have nothing to add.
         for layer in self.graph:
             message = torch.einsum("ij,bjk->bik", self.adj, h)
+            if mask is not None:
+                message = message / w.unsqueeze(-1)
             h = h + self.dropout(torch.relu(layer(message)))
+            if mask is not None:
+                h = h * m.unsqueeze(-1)
 
         # Decode each station from its fused state, starting at its own last
         # observed target.
@@ -113,7 +134,9 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
                 X_val: np.ndarray, y_val: np.ndarray, epochs: int = 40,
                 lr: float = 1e-3, batch_size: int = 128, patience: int = 6,
                 grad_clip: float = 1.0,
-                device: str | None = "auto") -> STGNNHistory:
+                device: str | None = "auto",
+                mask_train: np.ndarray | None = None,
+                mask_val: np.ndarray | None = None) -> STGNNHistory:
     """Joint training over every station at once — the centralised privilege."""
     dev = resolve_device(device)
     model.to(dev)
@@ -122,21 +145,38 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
     history = STGNNHistory()
     best_state, stale = None, 0
 
-    def loader(X, y, shuffle):
+    def loader(X, y, m, shuffle):
+        if m is None:
+            m = np.ones(y.shape[:2], dtype=bool)
         ds = torch.utils.data.TensorDataset(
             torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)),
-            torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32)))
+            torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32)),
+            torch.from_numpy(np.ascontiguousarray(m, dtype=bool)))
         return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
-    train_loader, val_loader = loader(X_train, y_train, True), loader(X_val, y_val, False)
+    train_loader = loader(X_train, y_train, mask_train, True)
+    val_loader = loader(X_val, y_val, mask_val, False)
+
+    def masked_mse(pred, target, m):
+        """Mean squared error over present (sample, station) pairs only.
+
+        Scoring absent stations against their zero fill would train the model to
+        predict each station's own mean whenever it is missing, which is both
+        wrong and trivially easy -- it would drag the reported loss down while
+        making the forecasts worse."""
+        w = m.unsqueeze(-1).to(pred.dtype)
+        denom = w.sum() * pred.shape[-1] / max(pred.shape[-1], 1)
+        return ((pred - target) ** 2 * w).sum() / denom.clamp_min(1.0)
 
     for epoch in range(epochs):
         model.train()
         total, n = 0.0, 0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)
+        for xb, yb, mb in train_loader:
+            xb, yb, mb = (xb.to(dev, non_blocking=True),
+                          yb.to(dev, non_blocking=True),
+                          mb.to(dev, non_blocking=True))
             opt.zero_grad()
-            loss = loss_fn(model(xb), yb)
+            loss = masked_mse(model(xb, mb), yb, mb)
             loss.backward()
             if grad_clip:
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -148,9 +188,11 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
         model.eval()
         vtotal, vn = 0.0, 0
         with torch.no_grad():
-            for xb, yb in val_loader:
-                xb, yb = xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)
-                vtotal += float(loss_fn(model(xb), yb).item()) * len(xb)
+            for xb, yb, mb in val_loader:
+                xb, yb, mb = (xb.to(dev, non_blocking=True),
+                              yb.to(dev, non_blocking=True),
+                              mb.to(dev, non_blocking=True))
+                vtotal += float(masked_mse(model(xb, mb), yb, mb).item()) * len(xb)
                 vn += len(xb)
         val = vtotal / max(vn, 1)
         history.val_loss.append(val)
@@ -177,7 +219,7 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
 
 
 def predict(model: SpatioTemporalGNN, X: np.ndarray,
-            batch_size: int = 256) -> np.ndarray:
+            batch_size: int = 256, mask: np.ndarray | None = None) -> np.ndarray:
     model.eval()
     # Follow the model rather than re-resolving: after training it already
     # lives wherever it was trained, and moving it back would be silent waste.
@@ -187,6 +229,10 @@ def predict(model: SpatioTemporalGNN, X: np.ndarray,
         for start in range(0, len(X), batch_size):
             batch = torch.from_numpy(
                 np.ascontiguousarray(X[start:start + batch_size], dtype=np.float32))
-            out.append(model(batch.to(dev)).cpu().numpy())
+            mb = None
+            if mask is not None:
+                mb = torch.from_numpy(np.ascontiguousarray(
+                    mask[start:start + batch_size], dtype=bool)).to(dev)
+            out.append(model(batch.to(dev), mb).cpu().numpy())
     return (np.concatenate(out, axis=0) if out
             else np.empty((0, 0, model.horizon), dtype=np.float32))

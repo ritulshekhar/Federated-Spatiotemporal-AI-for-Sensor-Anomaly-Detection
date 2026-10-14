@@ -465,30 +465,69 @@ def align_features(stations: list[StationData]) -> tuple[list[str], dict[str, np
 # Rungs 4-6 — Phase 2
 # ---------------------------------------------------------------------------
 def _aligned_windows(stations: list[StationData], per_station_idx: dict,
-                     split: str):
-    """(n, n_stations, L, F) inputs and (n, n_stations, H) targets.
+                     split: str, min_fraction: float = 0.6):
+    """(n, n_stations, L, F) inputs, (n, n_stations, H) targets, and a mask.
 
-    Only window origins present at *every* station can be used: a centralised
-    spatial model needs all nodes for the same hour. Returns the common ``t0``
-    and, for each station, the positions those rows occupy in its own arrays,
-    so predictions can be mapped back per station afterwards.
+    Originally this required a window origin present at *every* station, which
+    is clean but does not survive a real network: across 69 Catalan stations
+    **no hour at all** is reported by all of them, so rungs 4 and 6 simply
+    could not run. The intersection shrinks steadily with node count -- 100% of
+    origins at 15 stations, 86% at 30, 57% at 50, zero at 69.
+
+    So an hour now qualifies when at least ``min_fraction`` of stations
+    reported it. Absent stations are zero-filled and flagged in the returned
+    boolean mask ``(n, n_stations)``; the model must use that mask rather than
+    treat a zero as a measurement, and the loss must ignore absent entries.
+    Zero is not neutral here -- the features are z-scored, so zero is each
+    station's own training mean, and an unmasked model would read "absent" as
+    "perfectly average".
     """
     t0s = [st.splits[split].t0 for st in stations]
-    common = t0s[0]
-    for t in t0s[1:]:
-        common = np.intersect1d(common, t)
-    if common.size == 0:
-        raise ValueError(f"no window origins common to all stations in {split!r}")
+    counts: dict = {}
+    for t in t0s:
+        for v in t:
+            counts[v] = counts.get(v, 0) + 1
 
-    X, y, positions = [], [], {}
+    need = max(2, int(np.ceil(min_fraction * len(stations))))
+    common = np.array(sorted(v for v, c in counts.items() if c >= need))
+    if common.size == 0:
+        raise ValueError(
+            f"no window origin in {split!r} is reported by at least {need} of "
+            f"{len(stations)} stations; lower min_fraction or narrow the node set"
+        )
+
+    full = sum(1 for v, c in counts.items() if c == len(stations))
+    log.info("%s: %s origin(s) reported by >=%d of %d stations (%s reported by "
+             "all)", split, f"{common.size:,}", need, len(stations), f"{full:,}")
+
+    X, y, positions, mask = [], [], {}, []
+    n_feat = len(next(iter(per_station_idx.values())))
+    L = stations[0].splits[split].X.shape[1]
+    H = stations[0].splits[split].y.shape[1]
+
     for st in stations:
         ws = st.splits[split]
         order = np.argsort(ws.t0)
-        pos = order[np.searchsorted(ws.t0[order], common)]
-        positions[st.station_id] = pos
-        X.append(ws.X[pos][:, :, per_station_idx[st.station_id]])
-        y.append(ws.y[pos])
-    return np.stack(X, axis=1), np.stack(y, axis=1), common, positions
+        sorted_t0 = ws.t0[order]
+        slot = np.searchsorted(sorted_t0, common)
+        slot_clipped = np.clip(slot, 0, max(len(sorted_t0) - 1, 0))
+        present = sorted_t0[slot_clipped] == common
+
+        pos = order[slot_clipped]
+        positions[st.station_id] = np.where(present, pos, -1)
+
+        xi = np.zeros((common.size, L, n_feat), dtype=ws.X.dtype)
+        yi = np.zeros((common.size, H), dtype=ws.y.dtype)
+        if present.any():
+            take = pos[present]
+            xi[present] = ws.X[take][:, :, per_station_idx[st.station_id]]
+            yi[present] = ws.y[take]
+        X.append(xi)
+        y.append(yi)
+        mask.append(present)
+
+    return (np.stack(X, axis=1), np.stack(y, axis=1), common, positions,
+            np.stack(mask, axis=1))
 
 
 def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
@@ -538,11 +577,13 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
     history = train_stgnn(
         model, data["train"][0], data["train"][1],
         data["val"][0], data["val"][1],
+        mask_train=data["train"][4], mask_val=data["val"][4],
         **{k: v for k, v in model_cfg.get("centralised_gru", {}).get("train", {}).items()
            if k in ("epochs", "lr", "batch_size", "grad_clip")},
     )
 
-    preds = {s: predict(model, data[s][0]) for s in ("val", "test")}
+    preds = {s: predict(model, data[s][0], mask=data[s][4])
+             for s in ("val", "test")}
 
     records, thresholds = [], {}
     for i, st in enumerate(stations):
@@ -552,7 +593,13 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
         for split in ("val", "test"):
             ws = st.splits[split]
             arr = np.full((len(ws), horizon), np.nan, dtype=np.float32)
-            arr[data[split][3][st.station_id]] = preds[split][:, i, :]
+            # A station absent for an aligned hour has position -1 and no
+            # prediction to scatter; leaving those NaN keeps them out of
+            # scoring rather than writing a zero-filled forecast back.
+            pos = data[split][3][st.station_id]
+            present = data[split][4][:, i]
+            if present.any():
+                arr[pos[present]] = preds[split][present, i, :]
             full[split] = arr
         r, thr = score_station(st, "4_centralised_stgnn", full["val"], full["test"],
                                **score_kwargs)
@@ -623,32 +670,52 @@ def rung5_fedavg_gru(stations: list[StationData], model_cfg: dict,
     return pd.concat(records, ignore_index=True), thresholds, history.as_dict()
 
 
-def _aligned_hidden_states(clients, global_weights, split: str):
-    """(n_windows, n_stations, hidden) over window origins common to all stations.
+def _aligned_hidden_states(clients, global_weights, split: str,
+                           min_fraction: float = 0.6):
+    """(n_windows, n_stations, hidden), the origins, and a presence mask.
 
-    Stations have different coverage, so the server can only reason about hours
-    every node actually reported. The intersection of ``t0`` is that set.
+    Previously the server could only reason about hours *every* node reported,
+    which is impossible past about 50 stations -- across the full 69-station
+    Catalan set the intersection is empty, so rung 6 could not run at all. An
+    hour now qualifies when ``min_fraction`` of stations reported it, and the
+    mask says which. Absent stations get a zero hidden state, which the
+    reconstructor must not treat as a real encoding.
     """
-    per_station, t0s = {}, []
+    per_station, counts = {}, {}
     for c in clients:
         ws = c.station.splits[split]
         c.trainer.set_weights(global_weights)
         per_station[c.station_id] = (ws.t0, c.trainer.embed(c.X(split)))
-        t0s.append(ws.t0)
+        for v in ws.t0:
+            counts[v] = counts.get(v, 0) + 1
 
-    common = t0s[0]
-    for t in t0s[1:]:
-        common = np.intersect1d(common, t)
+    need = max(2, int(np.ceil(min_fraction * len(clients))))
+    common = np.array(sorted(v for v, n in counts.items() if n >= need))
     if common.size == 0:
-        raise ValueError(f"no window origins common to all stations in {split!r}")
+        raise ValueError(
+            f"no window origin in {split!r} is reported by at least {need} of "
+            f"{len(clients)} stations"
+        )
 
-    stacked = []
+    stacked, mask = [], []
+    hidden = next(iter(per_station.values()))[1].shape[1]
     for c in clients:
         t0, emb = per_station[c.station_id]
         order = np.argsort(t0)
-        pos = np.searchsorted(t0[order], common)
-        stacked.append(emb[order[pos]])
-    return np.stack(stacked, axis=1), common
+        sorted_t0 = t0[order]
+        slot = np.clip(np.searchsorted(sorted_t0, common), 0,
+                       max(len(sorted_t0) - 1, 0))
+        present = sorted_t0[slot] == common
+        out = np.zeros((common.size, hidden), dtype=emb.dtype)
+        if present.any():
+            out[present] = emb[order[slot][present]]
+        stacked.append(out)
+        mask.append(present)
+
+    full = sum(1 for v, n in counts.items() if n == len(clients))
+    log.info("%s hidden states: %s origin(s) at >=%d of %d stations (%s at all)",
+             split, f"{common.size:,}", need, len(clients), f"{full:,}")
+    return np.stack(stacked, axis=1), common, np.stack(mask, axis=1)
 
 
 def _make_embedder(reconstructor_holder: dict, gcfg: dict, station_ids: list[str],
@@ -667,14 +734,20 @@ def _make_embedder(reconstructor_holder: dict, gcfg: dict, station_ids: list[str
     def embed_fn(clients, global_weights):
         hidden, positions, bytes_up = {}, {}, 0
         for split in ("train", "val", "test"):
-            H, common = _aligned_hidden_states(clients, global_weights, split)
+            H, common, present = _aligned_hidden_states(
+                clients, global_weights, split)
             hidden[split] = H
             bytes_up += H.nbytes
             positions[split] = {}
-            for c in clients:
+            for i, c in enumerate(clients):
                 t0 = c.station.splits[split].t0
                 order = np.argsort(t0)
-                positions[split][c.station_id] = order[np.searchsorted(t0[order], common)]
+                slot = np.clip(np.searchsorted(t0[order], common), 0,
+                               max(len(t0) - 1, 0))
+                # -1 marks an hour this station did not report, so nothing is
+                # scattered back to it.
+                positions[split][c.station_id] = np.where(
+                    present[:, i], order[slot], -1)
 
         if reconstructor_holder.get("model") is None:
             adjacency = build_adjacency(
@@ -793,11 +866,16 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
         gnn_history = train_reconstructor(reconstructor, H["train"][0], H["val"][0])
 
     metric = model_cfg["decision_layer"]["spatial_agreement"]["metric"]
-    disagreement = {
-        split: (spatial_disagreement(reconstructor, H[split][0], metric=metric),
-                H[split][1])
-        for split in ("val", "test")
-    }
+
+    def _disagree(split):
+        d = spatial_disagreement(reconstructor, H[split][0], metric=metric)
+        # A station absent for an hour has a zero-filled hidden state, which
+        # would reconstruct as a confident, meaningless disagreement. NaN keeps
+        # it out of scoring entirely rather than inventing a score for it.
+        return np.where(H[split][2], d, np.nan)
+
+    disagreement = {split: (_disagree(split), H[split][1])
+                    for split in ("val", "test")}
 
     # Hidden-state uploads are real communication cost (§8.2).
     hidden_mb = sum(H[s][0].nbytes for s in ("val", "test")) / 1e6
