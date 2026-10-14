@@ -36,3 +36,8 @@ runs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# node (docx report generation)
+node_modules/
+package-lock.json
+package.json
