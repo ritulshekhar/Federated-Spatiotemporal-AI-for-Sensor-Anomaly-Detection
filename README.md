@@ -25,7 +25,39 @@ possible.
 |---|---|
 | **1** — data pipeline, preprocessing, baseline rungs 1–3 | Complete, on real EEA data |
 | **2** — ST-GNN, FedAvg, server GNN + decision layer (rungs 4–6) | **Complete** — all six §8.1 rungs built and reported |
-| **3** — dashboard, India generalization experiment | Acquisition + schema verified; not wired in |
+| **3** — dashboard, India transfer, clustered aggregation | **Complete** — dashboard published, Delhi transfer measured, clustering measured and rejected |
+
+All seven §1.1 objectives are met. The headline run is **30 Catalan stations**
+(`outputs/phase5_scale30`); the original 7-station Barcelona set
+(`outputs/phase4_drift_fixed`) is retained because the two differ in ways that
+matter — see "How much of this is real".
+
+### The result, in one table
+
+Paired block bootstrap at a 3-hour horizon, **resampling stations and time**,
+30 stations. This is the strict test; nothing survived it at 7 stations.
+
+| comparison | metric | difference | 95% interval | real? |
+|---|---|---|---|---|
+| proposed − FedAvg (does spatial reasoning help?) | recall | **+0.119** | [0.051, 0.200] | **yes** |
+| | precision | **−0.191** | [−0.288, −0.094] | **yes** |
+| | F1 | +0.059 | [−0.007, 0.136] | no |
+| proposed − centralised (what does privacy cost?) | **F1** | **+0.002** | [−0.034, 0.045] | **no — indistinguishable** |
+
+Read that as: cross-station spatial reasoning **trades precision for recall**,
+and both halves of the trade are established rather than noise. F1 cannot
+separate them. And the federated model, which never sees a raw neighbour
+reading, matches a centralised model with full raw access on F1.
+
+Three results that cut against the project, kept here rather than buried:
+
+- **Federation does not help forecasting.** Purely local per-station models beat
+  the federated global model at every horizon (13.70/16.18/17.04 against
+  13.80/16.55/17.31 RMSE). Federation earns its place through the spatial half.
+- **Drift is detectable per station, not per reading** — 0.688 precision at 30
+  stations, but per-reading drift recall is still ~0.01.
+- **The spatial rungs cannot run on the full 69-station network at all**: zero
+  window origins are common to every station, and rungs 4 and 6 require them.
 
 ### What the real data looks like
 
@@ -33,8 +65,8 @@ Measured from the EEA E1a (verified) delivery for Catalonia, 2017–2024:
 
 | | |
 |---|---|
-| Stations | 7 Barcelona stations reporting NO2 |
-| Rows | 990,598 |
+| Stations | 30 Catalan stations reporting NO2 (7-station Barcelona set also retained) |
+| Rows | 990,598 across the 7-station set |
 | **Real fault rate** | **2.805%** (1.6%–4.6% per station) |
 | Validity codes present | `1` and `-1` only — no `-99` maintenance flags exist in this node set |
 | Verification | every row is `1` (verified) |
@@ -157,18 +189,64 @@ have said the same about these seven stations?" — three effects are real:
 | dropout | **+0.127** | [0.016, 0.221] |
 | noise | **−0.125** | [−0.203, −0.045] |
 
-**Resampling stations as well, nothing is significant.** With seven stations,
-station-to-station variability swamps every effect. So rung 6 detecting
-stuck-at where other rungs detect none is *demonstrated on this node set* and
-*not yet established as general* — and scaling to Catalonia's ~129 stations is
-the only way to close those intervals.
+**Resampling stations as well, nothing was significant - at seven stations.**
+Station-to-station variability swamped every effect, so the rung-6 advantage
+was *demonstrated on that node set* and *not established as general*.
+
+**At thirty stations it is.** The scale-up was run specifically to close those
+intervals and it did: recall +0.119 [0.051, 0.200] and precision
+-0.191 [-0.288, -0.094] both exclude zero under station *and* time resampling.
+See the table at the top of this file, and `CONTEXT.md` entry 24.
+
+Two caveats worth keeping. The subtype-level effects above are still
+time-resampled only. And the node set is capped by an architectural limit
+rather than by patience: **69 stations share zero common window origins**, and
+rungs 4 and 6 can only use hours every participating station reported, so
+scaling past ~30 needs the spatial model changed rather than more compute.
 
 ```bash
-python -m src.evaluation.uncertainty outputs/phase2_ladder outputs/phase2_rung6_split \
-    --models 5_fedavg_gru 6_proposed --horizon 3 --compare 6_proposed 5_fedavg_gru
+# 30 stations, both comparisons
+python -m src.evaluation.uncertainty outputs/phase5_scale30 --horizon 3     --compare 6_proposed 5_fedavg_gru --level both
+python -m src.evaluation.uncertainty outputs/phase5_scale30 --horizon 3     --compare 6_proposed 4_centralised_stgnn --level stations
 ```
 
-See `CONTEXT.md` entries 11–16.
+See `CONTEXT.md` entries 11-16 for the 7-station analysis and 24 for the
+30-station one.
+
+### Transfer to Delhi (`outputs/phase6_transfer_india/`, section 5.8)
+
+The Catalonia-trained model applied to seven Delhi stations **without
+retraining**. Section 5.8 predicted the learned weather-to-pollution
+relationship would not transfer; measured, it largely does - MAPE is 41.7%
+against 34.0% at 1h and **essentially identical at 6h** (68.7% against 68.3%).
+RMSE is 3.2x worse, but that is scale, which per-station normalisation already
+handles.
+
+What breaks is calibration. Per-station residual thresholds span **26.8x** in
+Delhi against **1.6x** in Catalonia, and the consequence inverts the usual
+advice: Delhi detects *better* with Catalonia's threshold (precision 0.564)
+than with one fitted to its own validation window (0.092). That window is
+~2,100 windows against Catalonia's ~10,000 - too short to estimate a 0.5%-FPR
+threshold stably. The headline x1.22 median shift is the least informative
+number in the experiment, and reporting it alone would have hidden all of this.
+
+India remains a **generalization test only** (section 2.6): never trained on,
+every row `label_source="synthetic"`, injection rate and episode durations both
+borrowed from the measured EEA values.
+
+### Clustered aggregation: measured and rejected (`outputs/phase7_clustered30/`)
+
+Section 5.7 says to reach for Hammad-style communities only if `region_first`
+proves insufficient. At 30 stations it has not: clustering is worse on RMSE at
+every horizon (+1.2/+2.0/+3.0%) and on F1 (0.379 against 0.389), better only on
+the false-positive control (0.093 against 0.130).
+
+The reason matters more than the result. Clustering split the stations
+**[18, 9, 1, 1, 1]**, and equal weight per community hands three singleton
+stations 60% of the global model between them. The rule exists so a crowd
+cannot outvote a lone station; at this community structure it overcorrects into
+exactly the opposite failure. The code stays implemented and tested; the config
+stays on `region_first`. See `CONTEXT.md` entry 26.
 
 Two findings that shaped the configuration, both recorded in `CONTEXT.md`:
 

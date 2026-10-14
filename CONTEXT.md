@@ -2556,3 +2556,76 @@ Two things follow, neither implemented because both are beyond the stated plan:
 `configs/federation.yaml` is restored to `region_first`, which remains the
 LOCKED default of §5.7. The clustered path stays implemented and tested, with
 this entry recording why it is not switched on.
+
+---
+
+## [2026-10-14] entry 27 — closing the loop on the documents
+
+No new measurements. This entry records that the three standing documents now
+match what was actually measured, because two of them had drifted into saying
+things the data contradicts.
+
+### CLAUDE.md §11 — two open risks resolved, neither silently
+
+§11 says "do not silently resolve these, flag them", so both are resolved in
+place with their evidence rather than deleted.
+
+**The embedding-based `spatial_agreement()` works.** This was the project's
+single largest open risk: no cited paper computes spatial agreement from
+compressed embeddings rather than raw neighbour data, so compression might
+simply have destroyed the signal. It did not. At 30 stations the mechanism adds
+recall +0.119 [0.051, 0.200] over federated training without it, under
+resampling of both stations and time, and ties a centralised model with full
+raw access on F1 (+0.002 [-0.034, 0.045]). Two qualifications kept attached to
+the resolution: it *trades* rather than dominates (precision -0.191), and at 7
+stations nothing was establishable, so the claim is about node sets of this
+size and not about the method in general.
+
+**CPCB's schema is verified, and §5.1's guess was wrong in four ways** — the
+timezone handling, the sampling rate, units being a property of the sensor
+rather than the dataset, and CO's label being outright incorrect. All four are
+recorded in entry 20; §11 now points at them.
+
+The third §11 risk — that nothing in EEA data confirms "genuine pollution
+event" as against "normal high reading" — **remains open and untouched**.
+`fpr_on_extremes` is still a quantile proxy, not a confirmed episode list.
+
+### CLAUDE.md §2.4a — the mechanism paragraph was overclaiming
+
+§2.4a described the drift mechanism as "one station's bucket rising while its
+neighbours stay put is drift". That is the design intent and it is what happens
+at 30 stations, but as written it implied the method works wherever there are
+neighbours. Entry 24 showed it does not: at 7 Barcelona stations it scores zero
+true positives, because stations inside one city co-move and the neighbour
+median moves with them.
+
+The amendment now states the measured scope: precision 0.688 / recall 0.647 at
+30 stations, total failure at 7, **dispersion among neighbours required rather
+than merely neighbours**, stations identified rather than readings, and roughly
+one flag in three being a genuine local level shift rather than drift. A dense
+single-city cluster is the worst case for this detector, not the best — which
+is the opposite of what a reader would assume.
+
+### README.md
+
+Rewritten where it was stale: it still described a 7-station project whose
+differences were all inside their confidence intervals. It now leads with the
+30-station bootstrap result, states the three findings that cut against the
+project (federation not helping forecasting, drift being per-station only, and
+the 69-station spatial limit), and carries the Delhi transfer and the rejected
+clustering experiment.
+
+### What remains genuinely open
+
+* **The level bucket over time.** Same one byte per upload, but cumulative
+  disclosure across rounds. The owner's call; entry 23 sets out both sides. Less
+  urgent since the per-station snapshot already reaches 0.688 precision.
+* **The 69-station spatial limit.** Zero common window origins means rungs 4
+  and 6 cannot run on the full network *as implemented*. Masking absent
+  stations per timestamp would lift the cap; nobody has tried it.
+* **Real co-located fault labels** (§2.1a's recommended stretch goal). Still the
+  one change that would materially strengthen Objective 4's headline, since
+  every fault number in this project is measured against synthetic injection.
+* **Operating points at n=30.** The alert/review split and the magnitude
+  stratification are still the 7-station figures, flagged as such in the
+  dashboard payload.

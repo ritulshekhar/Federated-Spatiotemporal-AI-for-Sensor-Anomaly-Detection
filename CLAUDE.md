@@ -140,6 +140,16 @@ should change, flag it explicitly rather than silently deviating.
    neighbours stay put is drift — which is exactly §7.4's spatial-agreement logic applied to level
    instead of residual. Enforced in code: `configs/federation.yaml` `privacy:` lists it, and
    `check_upload` runs on every upload, every round.
+
+   *Measured 2026-10-14, and the scope is narrower than the paragraph above implies.* At 30
+   stations it identifies drifting stations with precision 0.688 and recall 0.647. At **7**
+   stations it fails completely — 0 true positives — because all seven Barcelona stations sat in
+   the same bucket: stations inside one city co-move, so the neighbour median moves with them and
+   disagreement is zero for everyone, drifting or not. **The mechanism needs dispersion among
+   neighbours, not merely neighbours**, which makes a dense single-city cluster its worst case
+   rather than its best. Two further limits: it identifies *stations*, never *readings* (§2.4a
+   permits one ordinal per station per upload, so per-reading drift recall stays ~0.01), and about
+   one flag in three is a genuine local level shift rather than drift. CONTEXT.md entries 23-24.
 5. **The citation replacing "Veera Brahmam & Gopikrishnan (2024)" is Alduais, Abdullah & Jamil
    (2019), "RDCM."** The former was retracted by Elsevier (Sept 2025) for plagiarizing the latter.
    Never re-add the retracted citation.
@@ -584,9 +594,25 @@ Do not start Phase 3 before Phase 1 and 2 produce real, reported numbers for eve
   compressed embeddings rather than raw data. Every cited paper does one or the other, never both.
   This is genuinely untested — expect it to need real experimentation, and report negative results
   honestly if compression turns out to destroy the signal needed.
+  **RESOLVED 2026-10-14, and it works.** At 30 stations the embedding-based mechanism adds
+  recall +0.119 [0.051, 0.200] over federated training without it, under resampling of both
+  stations and time, and matches a centralised model with full raw access on F1
+  (+0.002 [-0.034, 0.045]). Compression does **not** destroy the signal. Two honest qualifications:
+  it costs precision (-0.191 [-0.288, -0.094]), so it trades rather than dominates; and at 7
+  stations nothing was establishable, so the claim is specifically about node sets of this size.
+  CONTEXT.md entry 24.
 - CPCB's actual export schema (column names, units, whether `pollutant_avg` is hourly or some other
   aggregation) has not been verified against a real downloaded sample — confirm before trusting
   `harmonize_cpcb()` in §5.1.
+  **RESOLVED 2026-10-13, and the guess was wrong in four ways.** Verified against the real OpenAQ
+  archive: the columns are `location_id | sensors_id | location | datetime | lat | lon | parameter
+  | units | value` — not the `data.gov.in` shape §5.1 sketched. (1) `datetime` is already
+  ISO-8601 with a UTC offset, so §5.1's `tz_localize("Asia/Kolkata")` would have shifted every
+  reading by +5:30. (2) Readings are **quarter-hourly**, not hourly, so they are averaged to hourly
+  means. (3) A unit is a property of the *sensor*: a station exposes both a ug/m3 and a ppb sensor
+  for the same gas, so any aggregation keyed on (station, pollutant, hour) that ignores `units`
+  will average the two together. (4) CO's unit label is simply wrong — values are ~1000x too
+  small for ppb and match ppm — so CO is dropped for this source. CONTEXT.md entry 20.
 - The dataset's `Validity` field gives binary ground truth (valid/not valid) only. Nothing in EEA
   data separately confirms "this was a genuine pollution event" as opposed to "this was simply a
   normal high reading" — evaluating the event-vs-baseline distinction specifically will need
