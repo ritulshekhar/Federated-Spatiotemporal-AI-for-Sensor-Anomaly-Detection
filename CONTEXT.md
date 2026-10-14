@@ -2397,3 +2397,94 @@ The 5 false positives are the honest caveat. A bucket is in the station's own
 normalised units, so a flag means "this station has moved relative to its own
 history" — which is drift, or a genuine local event, or a seasonal shift that
 hits one station differently. Roughly one flag in three is not drift.
+
+---
+
+## [2026-10-14] entry 25 — the India transfer experiment: §5.8 answered, and the median hid the finding
+
+`outputs/phase6_transfer_india`. One GRU trained on Catalonia's 7 stations
+(327,361 pooled windows), then applied to Delhi's 7 **without any retraining**,
+over the 22 feature columns the two regions share. §2.6 holds: India is a
+generalization test, never training data.
+
+### Forecast transfer is far better than §5.8 predicted
+
+Median across stations, under the single Catalonia-trained model:
+
+| region | RMSE 1h | RMSE 3h | RMSE 6h | MAPE 1h | MAPE 3h | MAPE 6h |
+|---|---|---|---|---|---|---|
+| Catalonia | 15.09 | 19.15 | 20.08 | 34.0% | 55.9% | 68.3% |
+| India | 48.90 | 57.97 | 58.32 | 41.7% | 61.4% | **68.7%** |
+
+RMSE is 3.2x worse on Delhi, which looks damning until you notice MAPE is only
+1.23x worse at 1h and **essentially identical at 6h** (68.7% against 68.3%).
+The RMSE gap is overwhelmingly §5.8's issue (1), *scale* — Delhi's NO2 is
+simply higher, so the same relative error is a bigger absolute one.
+
+§5.8's issue (2) was the serious prediction: that the GRU learns Barcelona's
+traffic-and-wind relationship and that this "doesn't transfer to India's
+different dominant sources (biomass burning, construction dust)", and that
+normalisation cannot fix it. **Measured, that effect is much smaller than
+expected** — in relative terms the learned relationship transfers nearly as
+well to Delhi as it does within Barcelona, and at the 6h horizon it transfers
+indistinguishably. That is a partial refutation of §5.8's pessimism and should
+be reported as such.
+
+### The threshold shift is x1.22 — and that number is misleading on its own
+
+§5.8 asks for the required threshold shift as a reportable result. Median
+calibrated residual threshold: Catalonia 2.4733, India 3.0223, so **x1.22**.
+Benign-looking. It is also the least interesting number here, because the
+median is itself a pooling and it hides what actually happens:
+
+| region | min | median | max | spread |
+|---|---|---|---|---|
+| Catalonia | 1.771 | 2.473 | 2.844 | **1.6x** |
+| India | 0.564 | 3.022 | 15.103 | **26.8x** |
+
+Catalonia's seven stations calibrate to almost the same threshold. Delhi's seven
+span **27x**: IN-OAQ-5610 lands at 0.56 and IN-OAQ-5586 at 15.10. The transfer
+failure is not a shifted threshold, it is a **collapse of calibration
+stability**. §8.3 bans pooled numbers precisely because they hide this sort of
+thing, and here the median was the pooling.
+
+### Consequence: the transferred threshold beats local calibration
+
+Detection on test, horizon 3, same Catalonia-trained model:
+
+| region | calibration | precision | recall | F1 | FPR on extremes | flagged |
+|---|---|---|---|---|---|---|
+| Catalonia | own validation | 0.646 | 0.247 | 0.358 | 0.122 | 664 |
+| Catalonia | source threshold | 0.653 | 0.236 | 0.347 | 0.135 | 626 |
+| India | own validation | **0.092** | 0.129 | 0.107 | 0.242 | 545 |
+| India | source threshold | **0.564** | 0.137 | 0.220 | 0.084 | 94 |
+
+Delhi does **better with Catalonia's threshold than with its own**: precision
+0.564 against 0.092, F1 0.220 against 0.107. This is counterintuitive and
+follows directly from the instability — the two stations that calibrate near
+0.5 flag 545 readings between them and annihilate precision, while a single
+borrowed threshold flags 94 and keeps it.
+
+So the honest conclusion inverts the usual advice. §5.8 offers two options,
+per-region calibration or treating India as a pure generalization test. The
+data says **per-station local calibration is the worse of the two here**, because
+Delhi's validation split (~2,100 windows against Catalonia's ~10,000) is too
+short to estimate a 0.5%-FPR threshold stably. Badly-estimated local
+calibration loses to a well-estimated borrowed one.
+
+That is a statement about *validation-window length*, not about India, and it
+is testable: the prediction is that the instability shrinks as the Indian
+validation window grows. The archive's 2023-2024 hole (entry 20) is what
+currently prevents testing it, since it caps the usable Indian window at ~1.6
+years.
+
+### Caveats that travel with these numbers
+
+* Indian episode durations are **borrowed** from Catalonia's real `Validity`
+  distribution (entry 24), because CPCB has no Validity equivalent. Marked
+  `real_validity_episodes_borrowed` in every manifest.
+* Indian SO2 rests on an unvalidated ppb conversion (entry 20) and reads ~7x
+  high against the same stations' mass sensors. It is a feature here, not the
+  target, but it is in the shared feature set.
+* `station_class` for Indian stations is inferred from siting, not official
+  CPCB metadata, so the `station_class` grouping inherits that.
