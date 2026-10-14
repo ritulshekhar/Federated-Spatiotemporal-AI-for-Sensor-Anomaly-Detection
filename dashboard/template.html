@@ -135,10 +135,11 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 <header>
   <div class="eyebrow">Federated spatiotemporal AI · Catalonia</div>
   <h1>Catching broken air-quality sensors without sharing their data</h1>
-  <p class="lede">Seven Barcelona monitoring stations each train a forecasting model on their own
-    readings. Only model weights and a compressed summary of recent conditions ever leave a
-    station. A server compares those summaries across stations to decide whether an unusual
-    reading is real pollution or a failing instrument.</p>
+  <p class="lede">Thirty Catalan monitoring stations each train a forecasting model on their own
+    readings. Only model weights, a compressed summary of recent conditions, and a five-level
+    indicator of the station's own drift ever leave a station. A server compares those summaries
+    across stations to decide whether an unusual reading is real pollution or a failing
+    instrument.</p>
   <div class="facts" id="facts"></div>
 </header>
 
@@ -170,8 +171,10 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 
 <section>
   <div class="shead"><h2>The sensor network</h2></div>
-  <p class="snote">Ten stations were selected; three report no NO<sub>2</sub> and sit outside the
-    node set. Position is real latitude and longitude from the EEA station registry.</p>
+  <p class="snote">Filled markers are the thirty stations the headline run trains on, chosen by
+    record length because the spatial model can only use hours every node reported. Hollow markers
+    are the rest of the Catalan NO<sub>2</sub> registry. Position is real latitude and longitude
+    from the EEA station registry.</p>
   <div class="chartcard"><div id="map"></div><div class="legend" id="maplegend"></div></div>
 </section>
 
@@ -193,10 +196,11 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 
 <section>
   <div class="shead"><h2>Which faults get caught</h2></div>
-  <p class="snote">Six fault types are injected at the rate and episode lengths measured in the real
-    data. Only the corrupted value itself is synthetic. Stuck-at is the telling case: no model that
-    looks only at a station's own history finds it, because a frozen sensor is easier to predict
-    than a working one.</p>
+  <p class="snote">Six fault types are injected at the rate and episode lengths measured in the
+    real data. Only the corrupted value itself is synthetic. Spikes and noise are caught; a frozen,
+    drifting or offset sensor is barely caught at all, because each is <em>easier</em> to forecast
+    than a working one and so produces a smaller error, not a larger one. Widening the network from
+    seven stations to thirty moves every one of those off zero, and nowhere near far enough.</p>
   <div class="chartcard"><div id="subchart"></div><div class="legend" id="sublegend"></div></div>
 </section>
 
@@ -213,11 +217,39 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 </section>
 
 <section>
+  <div class="shead"><h2>Catching a drifting station</h2></div>
+  <p class="snote">Slow calibration drift is invisible to a station's own forecast error -- a
+    sensor that drifts slowly stays easy to predict, so the error shrinks rather than grows. Each
+    station therefore uploads one five-level indicator of where it currently sits relative to its
+    own history. A station whose level moves while its neighbours hold is drifting.</p>
+  <div class="tablewrap"><table id="drifttable"></table></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Does it transfer to Delhi?</h2></div>
+  <p class="snote">The Catalonia-trained model applied unchanged to seven Delhi stations, with no
+    retraining. Relative forecast error barely moves. What breaks is calibration: the residual
+    threshold each station settles on varies far more widely there.</p>
+  <div class="two">
+    <div class="chartcard"><h3>Forecast error, same model</h3>
+      <div class="tablewrap"><table id="transfertable"></table></div></div>
+    <div class="chartcard"><h3>Detection, by which threshold is used</h3>
+      <div class="tablewrap"><table id="transferdet"></table></div></div>
+  </div>
+</section>
+
+<section>
   <div class="shead"><h2>How much of this is certain</h2></div>
-  <p class="snote">Paired block bootstrap, proposed model minus federated baseline at a 3-hour
-    horizon. An interval that crosses zero means the data does not establish a difference. With
-    seven stations, none of the aggregate differences do.</p>
-  <div class="chartcard"><div id="cichart"></div></div>
+  <p class="snote">Paired block bootstrap at a 3-hour horizon, resampling both stations and
+    time. An interval that crosses zero means the data does not establish a difference. At seven
+    stations none of them did; at thirty, the recall gain and the precision cost both do.</p>
+  <div class="two">
+    <div class="chartcard"><h3>Against federated, no spatial reasoning</h3>
+      <div id="cichart"></div></div>
+    <div class="chartcard"><h3>Against centralised, no privacy constraint</h3>
+      <div id="cichart2"></div></div>
+  </div>
+  <p class="snote" id="cinote"></p>
 </section>
 
 <footer>
@@ -227,8 +259,11 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
     by a no-data sentinel, so the real labels mark absent readings rather than wrong ones.
     Evaluation uses injected faults matched to the measured real rate of 2.805% and to real fault
     episode durations.</div>
-  <div><b>Caveat.</b> Results come from one test window and seven stations. Differences between
-    models are mostly smaller than their confidence intervals.</div>
+  <div><b>Caveat.</b> Results come from one test window. At thirty stations the recall gain and
+    the precision cost both survive resampling; every other difference between models remains
+    inside its confidence interval.</div>
+  <div><b>Compute.</b> Trained on an NVIDIA RTX 4060 (CUDA 13.0). Earlier runs were accidentally
+    CPU-only, which is why the node set took this long to widen.</div>
   <div id="stamp" class="mono"></div>
 </footer>
 </div>
@@ -237,7 +272,7 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 <script>
 const D = JSON.parse(document.getElementById('fd').textContent);
 const NS = 'http://www.w3.org/2000/svg';
-const NODE_SET = new Set(['ES0691A','ES1396A','ES1438A','ES1480A','ES1679A','ES1856A','ES1992A']);
+const NODE_SET = new Set(D.node_set || []);
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const KNOWN_CLASS = new Set(['urban_traffic','urban_background','suburban_background']);
 
@@ -257,14 +292,17 @@ function svgRoot(w, h, label){
 /* ---------- header ---------- */
 const ds = D.dataset;
 document.getElementById('facts').innerHTML = [
-  ['Stations', ds.stations], ['Hourly readings', ds.rows.toLocaleString('en-GB')],
-  ['Years', ds.years], ['Pollutant', 'NO₂'],
+  ['Stations', ds.stations],
+  ['Years', ds.years],
+  ['Pollutant', 'NO₂'],
   ['Real fault rate', (ds.fault_rate*100).toFixed(2) + '%'],
-].map(([k,v]) => `<div class="fact"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+  ['Transfer set', ds.india_stations + ' Delhi, ' + ds.india_years],
+].filter(([,v]) => v != null && v !== 'undefined')
+ .map(([k,v]) => `<div class="fact"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
 document.getElementById('stamp').textContent = 'Generated ' + D.generated;
 
 /* ---------- findings ---------- */
-document.getElementById('findings').innerHTML = D.findings.map(f => `
+document.getElementById('findings').innerHTML = (D.findings || []).map(f => `
   <article class="finding ${esc(f.tone)}">
     <h3>${esc(f.title)}</h3>
     <p>${esc(f.detail)}</p>
@@ -346,6 +384,7 @@ function groupedBars(mountId, rows, series, opts){
 
 /* ---------- forecast error ---------- */
 (function(){
+  if (!D.forecasting) return;
   const want = {'1_persistence':'Persistence','2_local_gru':'Local GRU',
                 '3_centralised_gru':'Centralised GRU'};
   const byH = {};
@@ -374,7 +413,7 @@ function groupedBars(mountId, rows, series, opts){
     '5_fedavg_gru':'5 · Federated GRU','6_proposed':'6 · Proposed',
     '6_proposed_split':'6 · Proposed + embedding feedback'};
   const byModel = {};
-  D.ladder.forEach(r => { (byModel[r.model] = byModel[r.model] || {})[r.horizon] = r; });
+  (D.ladder || []).forEach(r => { (byModel[r.model] = byModel[r.model] || {})[r.horizon] = r; });
   const fmt = (v,d) => (v==null || Number.isNaN(v)) ? '—' : Number(v).toFixed(d==null?3:d);
   const body = Object.keys(NAMES).filter(m=>byModel[m]).map(m => {
     const r = byModel[m];
@@ -397,26 +436,25 @@ function groupedBars(mountId, rows, series, opts){
 (function(){
   const LBL = {spike:'Spike',noise:'Noise',dropout:'Dropout',stuck_at:'Stuck sensor',
                bias:'Constant offset',drift:'Slow drift'};
-  const base = {}, prop = {};
-  D.subtypes.forEach(r => {
-    const t = r.fault_type;
-    if (r.model === '6_proposed' || r.model === '6_proposed_split')
-      prop[t] = Math.max(prop[t] == null ? 0 : prop[t], r.recall);
-    else base[t] = Math.max(base[t] == null ? 0 : base[t], r.recall);
+  const by = {};
+  (D.subtypes || []).forEach(r => {
+    (by[r.fault_type] = by[r.fault_type] || {})[r.group] = r.recall;
   });
-  const rows = Object.keys(LBL).map(k => ({label:LBL[k],
-    values:{base: base[k]||0, prop: prop[k]||0}}));
-  groupedBars('subchart', rows, [{key:'base',cls:'s0'},{key:'prop',cls:'s1'}],
+  const rows = Object.keys(LBL).filter(k => by[k]).map(k => ({
+    label: LBL[k], values: {n7: by[k].n7 || 0, n30: by[k].n30 || 0}}));
+  if (!rows.length) return;
+  groupedBars('subchart', rows, [{key:'n7',cls:'s0'},{key:'n30',cls:'s1'}],
     {dp:3, max:1, left:136, label:'Share of faults detected, by fault type'});
   document.getElementById('sublegend').innerHTML =
-    `<span><i class="s0"></i>Best model using only its own history</span>
-     <span><i class="s1"></i>Proposed, using cross-station agreement</span>
-     <span>Share of faults detected · 1 hour ahead</span>`;
+    `<span><i class="s0"></i>7 stations</span>
+     <span><i class="s1"></i>30 stations</span>
+     <span>Share of faults detected &middot; 1 hour ahead &middot; mean across models</span>`;
 })();
 
 /* ---------- operating points ---------- */
 (function(){
-  const op = D.operating_points;
+  const op = D.operating_points || {};
+  if (!op.by_magnitude || !op.by_subtype) return;
   const LBL = {spike:'Spike',noise:'Noise',stuck_at:'Stuck sensor',dropout:'Dropout',
                bias:'Constant offset',drift:'Slow drift'};
   const series = [{key:'a',cls:'s-alert'},{key:'b',cls:'s-review'}];
@@ -432,11 +470,77 @@ function groupedBars(mountId, rows, series, opts){
      <span>σ is the station's own typical variation</span>`;
 })();
 
+/* ---------- drift identification ---------- */
+(function(){
+  const d = D.drift || {};
+  const order = [['n7','7 stations'],['n30','30 stations']];
+  const body = order.filter(([k]) => d[k]).map(([k,label]) => {
+    const r = d[k];
+    const fmt = v => (v == null ? '--' : Number(v).toFixed(3));
+    return `<tr><td>${esc(label)}</td>
+      <td class="num">${r.true_positive}</td>
+      <td class="num">${r.false_positive}</td>
+      <td class="num">${r.missed}</td>
+      <td class="num">${fmt(r.precision)}</td>
+      <td class="num">${fmt(r.recall)}</td></tr>`;
+  }).join('');
+  const t = document.getElementById('drifttable');
+  if (t) t.innerHTML = `<thead><tr><th>Node set</th><th>Correctly flagged</th>
+    <th>False alarms</th><th>Missed</th><th>Precision</th><th>Recall</th></tr></thead>
+    <tbody>${body}</tbody>
+    <caption>Stations, not readings: one indicator per station per round can identify a drifting
+     instrument but cannot say which of its readings are wrong. At seven stations the method fails
+     outright -- all seven sat in the same band, because stations inside one city move together.
+     It needs spread among neighbours, not merely neighbours.</caption>`;
+})();
+
+/* ---------- transfer to Delhi ---------- */
+(function(){
+  const tr = D.transfer || {};
+  const fc = tr.forecast || [];
+  if (fc.length){
+    const byRegion = {};
+    fc.forEach(r => { (byRegion[r.region] = byRegion[r.region] || {})[r.horizon] = r; });
+    const body = Object.keys(byRegion).sort().map(reg => {
+      const r = byRegion[reg];
+      const cell = (h, k) => (r[h] && r[h][k] != null ? Number(r[h][k]).toFixed(1) : '--');
+      return `<tr><td>${esc(reg)}</td>
+        <td class="num">${cell(1,'rmse')}</td><td class="num">${cell(6,'rmse')}</td>
+        <td class="num">${cell(1,'mape')}%</td><td class="num">${cell(6,'mape')}%</td></tr>`;
+    }).join('');
+    document.getElementById('transfertable').innerHTML =
+      `<thead><tr><th>Region</th><th>RMSE 1h</th><th>RMSE 6h</th>
+        <th>MAPE 1h</th><th>MAPE 6h</th></tr></thead><tbody>${body}</tbody>
+       <caption>Absolute error is ~3x larger in Delhi because its pollution is higher. In relative
+        terms the model transfers almost unchanged at the 6-hour horizon.</caption>`;
+  }
+  const det = tr.detection || [];
+  if (det.length){
+    const body = det.map(r => `<tr><td>${esc(r.region)}</td><td>${esc(r.calibration)}</td>
+      <td class="num">${Number(r.precision).toFixed(3)}</td>
+      <td class="num">${Number(r.recall).toFixed(3)}</td>
+      <td class="num">${Number(r.f1).toFixed(3)}</td></tr>`).join('');
+    document.getElementById('transferdet').innerHTML =
+      `<thead><tr><th>Region</th><th>Threshold</th><th>Precision</th><th>Recall</th>
+        <th>F1</th></tr></thead><tbody>${body}</tbody>
+       <caption>Delhi does better with Catalonia's threshold than with one fitted to its own
+        validation window, which is too short to estimate a rare-event threshold stably.</caption>`;
+  }
+})();
+
 /* ---------- confidence intervals ---------- */
 (function(){
-  const rows = D.uncertainty;
+  const U = D.uncertainty || {};
+  const note = document.getElementById('cinote');
+  if (note && U.n7_note) note.textContent = U.n7_note;
+  drawCI('cichart', U.vs_fedavg || []);
+  drawCI('cichart2', U.vs_centralised || []);
+})();
+
+function drawCI(mountId, rows){
+  (function(){
   if (!rows || !rows.length) return;
-  const W=820, rowH=42, pad={l:112,r:34,t:30,b:32};
+  const W=430, rowH=40, pad={l:124,r:30,t:30,b:30};
   const H = pad.t + pad.b + rows.length*rowH;
   const lim = Math.max(...rows.flatMap(r => [Math.abs(r.lo), Math.abs(r.hi)])) * 1.5;
   const x = v => pad.l + (v+lim)/(2*lim)*(W-pad.l-pad.r);
@@ -456,6 +560,7 @@ function groupedBars(mountId, rows, series, opts){
   });
   [-lim*0.7, 0, lim*0.7].forEach(v => s.appendChild(
     el('text',{class:'axis',x:x(v),y:H-pad.b+18,'text-anchor':'middle'}, v.toFixed(2))));
-  document.getElementById('cichart').appendChild(s);
-})();
+  document.getElementById(mountId).appendChild(s);
+  })();
+}
 </script>

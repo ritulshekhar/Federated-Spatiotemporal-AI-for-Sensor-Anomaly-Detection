@@ -135,10 +135,11 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 <header>
   <div class="eyebrow">Federated spatiotemporal AI · Catalonia</div>
   <h1>Catching broken air-quality sensors without sharing their data</h1>
-  <p class="lede">Seven Barcelona monitoring stations each train a forecasting model on their own
-    readings. Only model weights and a compressed summary of recent conditions ever leave a
-    station. A server compares those summaries across stations to decide whether an unusual
-    reading is real pollution or a failing instrument.</p>
+  <p class="lede">Thirty Catalan monitoring stations each train a forecasting model on their own
+    readings. Only model weights, a compressed summary of recent conditions, and a five-level
+    indicator of the station's own drift ever leave a station. A server compares those summaries
+    across stations to decide whether an unusual reading is real pollution or a failing
+    instrument.</p>
   <div class="facts" id="facts"></div>
 </header>
 
@@ -170,8 +171,10 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 
 <section>
   <div class="shead"><h2>The sensor network</h2></div>
-  <p class="snote">Ten stations were selected; three report no NO<sub>2</sub> and sit outside the
-    node set. Position is real latitude and longitude from the EEA station registry.</p>
+  <p class="snote">Filled markers are the thirty stations the headline run trains on, chosen by
+    record length because the spatial model can only use hours every node reported. Hollow markers
+    are the rest of the Catalan NO<sub>2</sub> registry. Position is real latitude and longitude
+    from the EEA station registry.</p>
   <div class="chartcard"><div id="map"></div><div class="legend" id="maplegend"></div></div>
 </section>
 
@@ -193,10 +196,11 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 
 <section>
   <div class="shead"><h2>Which faults get caught</h2></div>
-  <p class="snote">Six fault types are injected at the rate and episode lengths measured in the real
-    data. Only the corrupted value itself is synthetic. Stuck-at is the telling case: no model that
-    looks only at a station's own history finds it, because a frozen sensor is easier to predict
-    than a working one.</p>
+  <p class="snote">Six fault types are injected at the rate and episode lengths measured in the
+    real data. Only the corrupted value itself is synthetic. Spikes and noise are caught; a frozen,
+    drifting or offset sensor is barely caught at all, because each is <em>easier</em> to forecast
+    than a working one and so produces a smaller error, not a larger one. Widening the network from
+    seven stations to thirty moves every one of those off zero, and nowhere near far enough.</p>
   <div class="chartcard"><div id="subchart"></div><div class="legend" id="sublegend"></div></div>
 </section>
 
@@ -213,11 +217,39 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
 </section>
 
 <section>
+  <div class="shead"><h2>Catching a drifting station</h2></div>
+  <p class="snote">Slow calibration drift is invisible to a station's own forecast error -- a
+    sensor that drifts slowly stays easy to predict, so the error shrinks rather than grows. Each
+    station therefore uploads one five-level indicator of where it currently sits relative to its
+    own history. A station whose level moves while its neighbours hold is drifting.</p>
+  <div class="tablewrap"><table id="drifttable"></table></div>
+</section>
+
+<section>
+  <div class="shead"><h2>Does it transfer to Delhi?</h2></div>
+  <p class="snote">The Catalonia-trained model applied unchanged to seven Delhi stations, with no
+    retraining. Relative forecast error barely moves. What breaks is calibration: the residual
+    threshold each station settles on varies far more widely there.</p>
+  <div class="two">
+    <div class="chartcard"><h3>Forecast error, same model</h3>
+      <div class="tablewrap"><table id="transfertable"></table></div></div>
+    <div class="chartcard"><h3>Detection, by which threshold is used</h3>
+      <div class="tablewrap"><table id="transferdet"></table></div></div>
+  </div>
+</section>
+
+<section>
   <div class="shead"><h2>How much of this is certain</h2></div>
-  <p class="snote">Paired block bootstrap, proposed model minus federated baseline at a 3-hour
-    horizon. An interval that crosses zero means the data does not establish a difference. With
-    seven stations, none of the aggregate differences do.</p>
-  <div class="chartcard"><div id="cichart"></div></div>
+  <p class="snote">Paired block bootstrap at a 3-hour horizon, resampling both stations and
+    time. An interval that crosses zero means the data does not establish a difference. At seven
+    stations none of them did; at thirty, the recall gain and the precision cost both do.</p>
+  <div class="two">
+    <div class="chartcard"><h3>Against federated, no spatial reasoning</h3>
+      <div id="cichart"></div></div>
+    <div class="chartcard"><h3>Against centralised, no privacy constraint</h3>
+      <div id="cichart2"></div></div>
+  </div>
+  <p class="snote" id="cinote"></p>
 </section>
 
 <footer>
@@ -227,17 +259,20 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
     by a no-data sentinel, so the real labels mark absent readings rather than wrong ones.
     Evaluation uses injected faults matched to the measured real rate of 2.805% and to real fault
     episode durations.</div>
-  <div><b>Caveat.</b> Results come from one test window and seven stations. Differences between
-    models are mostly smaller than their confidence intervals.</div>
+  <div><b>Caveat.</b> Results come from one test window. At thirty stations the recall gain and
+    the precision cost both survive resampling; every other difference between models remains
+    inside its confidence interval.</div>
+  <div><b>Compute.</b> Trained on an NVIDIA RTX 4060 (CUDA 13.0). Earlier runs were accidentally
+    CPU-only, which is why the node set took this long to widen.</div>
   <div id="stamp" class="mono"></div>
 </footer>
 </div>
 
-<script id="fd" type="application/json">{"generated":"2026-10-12 22:50 UTC","stations":[{"id":"ES1438A","name":"Barcelona (Gracia - Sant Gervasi)","klass":"urban_traffic","lat":41.385343284,"lon":2.15382196},{"id":"ES1396A","name":"Barcelona (Eixample)","klass":"urban_background","lat":41.378802802,"lon":2.133098078},{"id":"ES1856A","name":"Barcelona (Sants)","klass":"urban_background","lat":41.4260772,"lon":2.147992032},{"id":"ES1679A","name":"Barcelona (Vall d'Hebron)","klass":"urban_background","lat":41.386413934,"lon":2.187416735},{"id":"ES0691A","name":"Barcelona (Ciutadella)","klass":"urban_background","lat":41.403881851,"lon":2.204522594},{"id":"ES1480A","name":"Barcelona (Poblenou)","klass":"urban_traffic","lat":41.39874325099999,"lon":2.153385124},{"id":"ES1992A","name":"Barcelona (Observatori Fabra)","klass":"urban_background","lat":41.38748464,"lon":2.115149666},{"id":"ES2027A","name":"Badalona","klass":"urban_background","lat":41.45131069,"lon":2.248236084},{"id":"ES1362A","name":"Sant Adria de Besos","klass":"urban_background","lat":41.38322658900001,"lon":2.044453466},{"id":"ES0559A","name":"Barcelona (Sants - traffic)","klass":"urban_traffic","lat":41.38742395799999,"lon":2.164918317}],"forecasting":{"without_met":[{"model":"1_persistence","horizon":1,"rmse":8.83726817186385,"min":8.074695309527506,"max":10.653620389260434},{"model":"1_persistence","horizon":3,"rmse":15.397955981145769,"min":14.324375663899096,"max":17.909438825187443},{"model":"1_persistence","horizon":6,"rmse":19.46677866629442,"min":17.665899838329953,"max":22.16264563778053},{"model":"2_local_gru","horizon":1,"rmse":8.023856846695319,"min":7.122503774711165,"max":9.590753956706976},{"model":"2_local_gru","horizon":3,"rmse":11.86601883583014,"min":10.393350402984227,"max":13.880224239198933},{"model":"2_local_gru","horizon":6,"rmse":13.51225352783585,"min":11.454588162778764,"max":15.497632749475718},{"model":"3_centralised_gru","horizon":1,"rmse":7.931660186992829,"min":7.046223986057425,"max":9.647059946739802},{"model":"3_centralised_gru","horizon":3,"rmse":12.092839442996937,"min":10.447917457592853,"max":14.17482927065882},{"model":"3_centralised_gru","horizon":6,"rmse":13.770008291070884,"min":11.742436872412368,"max":16.032803915842546}],"with_met":[{"model":"1_persistence","horizon":1,"rmse":8.83726817186385,"min":8.074695309527506,"max":10.653620389260434},{"model":"1_persistence","horizon":3,"rmse":15.397955981145769,"min":14.324375663899096,"max":17.909438825187443},{"model":"1_persistence","horizon":6,"rmse":19.46677866629442,"min":17.665899838329953,"max":22.16264563778053},{"model":"2_local_gru","horizon":1,"rmse":8.067475030086344,"min":7.167706475130405,"max":9.370202192070606},{"model":"2_local_gru","horizon":3,"rmse":11.70522838382788,"min":10.181492843459404,"max":13.297217230577685},{"model":"2_local_gru","horizon":6,"rmse":13.191623502262535,"min":11.108626778646842,"max":14.998461540498658},{"model":"3_centralised_gru","horizon":1,"rmse":7.98306089235372,"min":6.994331409133333,"max":9.45001846431289},{"model":"3_centralised_gru","horizon":3,"rmse":11.924318463606966,"min":10.416326057007774,"max":13.58265330482103},{"model":"3_centralised_gru","horizon":6,"rmse":13.336138767576363,"min":11.801673993213807,"max":15.131461408330006}],"per_station":[{"model":"1_persistence","station_id":"ES0691A","station_class":"urban_background","horizon":1,"rmse":8.485,"mae":5.709},{"model":"1_persistence","station_id":"ES0691A","station_class":"urban_background","horizon":3,"rmse":15.372,"mae":11.061},{"model":"1_persistence","station_id":"ES0691A","station_class":"urban_background","horizon":6,"rmse":19.406,"mae":14.599},{"model":"1_persistence","station_id":"ES1396A","station_class":"urban_background","horizon":1,"rmse":8.107,"mae":5.263},{"model":"1_persistence","station_id":"ES1396A","station_class":"urban_background","horizon":3,"rmse":14.719,"mae":9.975},{"model":"1_persistence","station_id":"ES1396A","station_class":"urban_background","horizon":6,"rmse":18.4,"mae":12.952},{"model":"1_persistence","station_id":"ES1679A","station_class":"urban_background","horizon":1,"rmse":10.654,"mae":6.902},{"model":"1_persistence","station_id":"ES1679A","station_class":"urban_background","horizon":3,"rmse":17.909,"mae":12.624},{"model":"1_persistence","station_id":"ES1679A","station_class":"urban_background","horizon":6,"rmse":21.368,"mae":15.812},{"model":"1_persistence","station_id":"ES1856A","station_class":"urban_background","horizon":1,"rmse":9.479,"mae":5.958},{"model":"1_persistence","station_id":"ES1856A","station_class":"urban_background","horizon":3,"rmse":16.252,"mae":10.916},{"model":"1_persistence","station_id":"ES1856A","station_class":"urban_background","horizon":6,"rmse":19.801,"mae":13.81},{"model":"1_persistence","station_id":"ES1992A","station_class":"urban_background","horizon":1,"rmse":8.075,"mae":5.089},{"model":"1_persistence","station_id":"ES1992A","station_class":"urban_background","horizon":3,"rmse":14.324,"mae":9.443},{"model":"1_persistence","station_id":"ES1992A","station_class":"urban_background","horizon":6,"rmse":17.666,"mae":12.04},{"model":"1_persistence","station_id":"ES1438A","station_class":"urban_traffic","horizon":1,"rmse":9.929,"mae":6.869},{"model":"1_persistence","station_id":"ES1438A","station_class":"urban_traffic","horizon":3,"rmse":17.59,"mae":12.855},{"model":"1_persistence","station_id":"ES1438A","station_class":"urban_traffic","horizon":6,"rmse":22.163,"mae":16.915},{"model":"1_persistence","station_id":"ES1480A","station_class":"urban_traffic","horizon":1,"rmse":8.837,"mae":6.016},{"model":"1_persistence","station_id":"ES1480A","station_class":"urban_traffic","horizon":3,"rmse":15.398,"mae":11.015},{"model":"1_persistence","station_id":"ES1480A","station_class":"urban_traffic","horizon":6,"rmse":19.467,"mae":14.547},{"model":"2_local_gru","station_id":"ES0691A","station_class":"urban_background","horizon":1,"rmse":7.369,"mae":5.18},{"model":"2_local_gru","station_id":"ES0691A","station_class":"urban_background","horizon":3,"rmse":11.096,"mae":8.216},{"model":"2_local_gru","station_id":"ES0691A","station_class":"urban_background","horizon":6,"rmse":12.824,"mae":9.781},{"model":"2_local_gru","station_id":"ES1396A","station_class":"urban_background","horizon":1,"rmse":7.194,"mae":4.942},{"model":"2_local_gru","station_id":"ES1396A","station_class":"urban_background","horizon":3,"rmse":10.625,"mae":7.495},{"model":"2_local_gru","station_id":"ES1396A","station_class":"urban_background","horizon":6,"rmse":11.965,"mae":8.646},{"model":"2_local_gru","station_id":"ES1679A","station_class":"urban_background","horizon":1,"rmse":9.37,"mae":6.42},{"model":"2_local_gru","station_id":"ES1679A","station_class":"urban_background","horizon":3,"rmse":13.297,"mae":9.843},{"model":"2_local_gru","station_id":"ES1679A","station_class":"urban_background","horizon":6,"rmse":14.998,"mae":11.386},{"model":"2_local_gru","station_id":"ES1856A","station_class":"urban_background","horizon":1,"rmse":8.35,"mae":5.765},{"model":"2_local_gru","station_id":"ES1856A","station_class":"urban_background","horizon":3,"rmse":11.949,"mae":8.739},{"model":"2_local_gru","station_id":"ES1856A","station_class":"urban_background","horizon":6,"rmse":13.192,"mae":10.035},{"model":"2_local_gru","station_id":"ES1992A","station_class":"urban_background","horizon":1,"rmse":7.168,"mae":4.913},{"model":"2_local_gru","station_id":"ES1992A","station_class":"urban_background","horizon":3,"rmse":10.181,"mae":7.167},{"model":"2_local_gru","station_id":"ES1992A","station_class":"urban_background","horizon":6,"rmse":11.109,"mae":7.892},{"model":"2_local_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":1,"rmse":8.887,"mae":6.366},{"model":"2_local_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":3,"rmse":12.925,"mae":9.616},{"model":"2_local_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":6,"rmse":14.848,"mae":11.474},{"model":"2_local_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":1,"rmse":8.067,"mae":5.786},{"model":"2_local_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":3,"rmse":11.705,"mae":8.764},{"model":"2_local_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":6,"rmse":13.231,"mae":10.211},{"model":"3_centralised_gru","station_id":"ES0691A","station_class":"urban_background","horizon":1,"rmse":7.472,"mae":5.339},{"model":"3_centralised_gru","station_id":"ES0691A","station_class":"urban_background","horizon":3,"rmse":11.313,"mae":8.559},{"model":"3_centralised_gru","station_id":"ES0691A","station_class":"urban_background","horizon":6,"rmse":12.85,"mae":10.066},{"model":"3_centralised_gru","station_id":"ES1396A","station_class":"urban_background","horizon":1,"rmse":7.093,"mae":4.9},{"model":"3_centralised_gru","station_id":"ES1396A","station_class":"urban_background","horizon":3,"rmse":10.742,"mae":7.814},{"model":"3_centralised_gru","station_id":"ES1396A","station_class":"urban_background","horizon":6,"rmse":12.146,"mae":9.261},{"model":"3_centralised_gru","station_id":"ES1679A","station_class":"urban_background","horizon":1,"rmse":9.45,"mae":6.434},{"model":"3_centralised_gru","station_id":"ES1679A","station_class":"urban_background","horizon":3,"rmse":13.583,"mae":9.986},{"model":"3_centralised_gru","station_id":"ES1679A","station_class":"urban_background","horizon":6,"rmse":15.074,"mae":11.511},{"model":"3_centralised_gru","station_id":"ES1856A","station_class":"urban_background","horizon":1,"rmse":8.268,"mae":5.463},{"model":"3_centralised_gru","station_id":"ES1856A","station_class":"urban_background","horizon":3,"rmse":11.924,"mae":8.45},{"model":"3_centralised_gru","station_id":"ES1856A","station_class":"urban_background","horizon":6,"rmse":13.336,"mae":9.801},{"model":"3_centralised_gru","station_id":"ES1992A","station_class":"urban_background","horizon":1,"rmse":6.994,"mae":4.713},{"model":"3_centralised_gru","station_id":"ES1992A","station_class":"urban_background","horizon":3,"rmse":10.416,"mae":7.417},{"model":"3_centralised_gru","station_id":"ES1992A","station_class":"urban_background","horizon":6,"rmse":11.802,"mae":8.798},{"model":"3_centralised_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":1,"rmse":8.788,"mae":6.401},{"model":"3_centralised_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":3,"rmse":13.146,"mae":10.08},{"model":"3_centralised_gru","station_id":"ES1438A","station_class":"urban_traffic","horizon":6,"rmse":15.131,"mae":12.03},{"model":"3_centralised_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":1,"rmse":7.983,"mae":5.756},{"model":"3_centralised_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":3,"rmse":11.956,"mae":9.101},{"model":"3_centralised_gru","station_id":"ES1480A","station_class":"urban_traffic","horizon":6,"rmse":13.708,"mae":10.829}]},"ladder":[{"model":"1_persistence","horizon":1,"rmse":17.231,"recall":0.153,"precision":0.661,"f1":0.248,"auc_pr":0.242,"fpr_on_extremes":0.0},{"model":"1_persistence","horizon":3,"rmse":25.4,"recall":0.213,"precision":0.486,"f1":0.303,"auc_pr":0.205,"fpr_on_extremes":0.071},{"model":"1_persistence","horizon":6,"rmse":28.162,"recall":0.205,"precision":0.434,"f1":0.275,"auc_pr":0.168,"fpr_on_extremes":0.141},{"model":"2_local_gru","horizon":1,"rmse":15.102,"recall":0.199,"precision":0.735,"f1":0.307,"auc_pr":0.307,"fpr_on_extremes":0.02},{"model":"2_local_gru","horizon":3,"rmse":19.029,"recall":0.234,"precision":0.652,"f1":0.351,"auc_pr":0.339,"fpr_on_extremes":0.142},{"model":"2_local_gru","horizon":6,"rmse":20.023,"recall":0.216,"precision":0.609,"f1":0.334,"auc_pr":0.32,"fpr_on_extremes":0.165},{"model":"3_centralised_gru","horizon":1,"rmse":15.098,"recall":0.189,"precision":0.721,"f1":0.296,"auc_pr":0.302,"fpr_on_extremes":0.025},{"model":"3_centralised_gru","horizon":3,"rmse":19.302,"recall":0.225,"precision":0.636,"f1":0.334,"auc_pr":0.342,"fpr_on_extremes":0.165},{"model":"3_centralised_gru","horizon":6,"rmse":20.849,"recall":0.216,"precision":0.691,"f1":0.333,"auc_pr":0.341,"fpr_on_extremes":0.203},{"model":"5_fedavg_gru","horizon":1,"rmse":15.1,"recall":0.202,"precision":0.722,"f1":0.314,"auc_pr":0.311,"fpr_on_extremes":0.024},{"model":"5_fedavg_gru","horizon":3,"rmse":19.378,"recall":0.234,"precision":0.682,"f1":0.344,"auc_pr":0.346,"fpr_on_extremes":0.157},{"model":"5_fedavg_gru","horizon":6,"rmse":20.689,"recall":0.215,"precision":0.692,"f1":0.341,"auc_pr":0.339,"fpr_on_extremes":0.188},{"model":"4_centralised_stgnn","horizon":1,"rmse":14.618,"recall":0.204,"precision":0.741,"f1":0.322,"auc_pr":0.343,"fpr_on_extremes":0.02},{"model":"4_centralised_stgnn","horizon":3,"rmse":18.097,"recall":0.245,"precision":0.64,"f1":0.357,"auc_pr":0.334,"fpr_on_extremes":0.17},{"model":"4_centralised_stgnn","horizon":6,"rmse":19.207,"recall":0.225,"precision":0.63,"f1":0.333,"auc_pr":0.343,"fpr_on_extremes":0.212},{"model":"6_proposed","horizon":1,"rmse":15.1,"recall":0.197,"precision":0.488,"f1":0.299,"auc_pr":0.255,"fpr_on_extremes":0.0},{"model":"6_proposed","horizon":3,"rmse":19.378,"recall":0.276,"precision":0.527,"f1":0.385,"auc_pr":0.384,"fpr_on_extremes":0.15},{"model":"6_proposed","horizon":6,"rmse":20.689,"recall":0.28,"precision":0.463,"f1":0.369,"auc_pr":0.357,"fpr_on_extremes":0.203},{"model":"6_proposed_split","horizon":1,"rmse":15.011,"recall":0.252,"precision":0.494,"f1":0.358,"auc_pr":0.35,"fpr_on_extremes":0.0},{"model":"6_proposed_split","horizon":3,"rmse":19.248,"recall":0.272,"precision":0.559,"f1":0.385,"auc_pr":0.373,"fpr_on_extremes":0.095},{"model":"6_proposed_split","horizon":6,"rmse":20.579,"recall":0.276,"precision":0.404,"f1":0.37,"auc_pr":0.364,"fpr_on_extremes":0.189}],"subtypes":[{"model":"1_persistence","fault_type":"bias","recall":0.0,"group":"baselines"},{"model":"1_persistence","fault_type":"drift","recall":0.0,"group":"baselines"},{"model":"1_persistence","fault_type":"dropout","recall":0.0,"group":"baselines"},{"model":"1_persistence","fault_type":"noise","recall":0.38,"group":"baselines"},{"model":"1_persistence","fault_type":"spike","recall":0.458,"group":"baselines"},{"model":"1_persistence","fault_type":"stuck_at","recall":0.0,"group":"baselines"},{"model":"2_local_gru","fault_type":"bias","recall":0.0,"group":"baselines"},{"model":"2_local_gru","fault_type":"drift","recall":0.0,"group":"baselines"},{"model":"2_local_gru","fault_type":"dropout","recall":0.018,"group":"baselines"},{"model":"2_local_gru","fault_type":"noise","recall":0.403,"group":"baselines"},{"model":"2_local_gru","fault_type":"spike","recall":0.59,"group":"baselines"},{"model":"2_local_gru","fault_type":"stuck_at","recall":0.0,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"bias","recall":0.0,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"drift","recall":0.0,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"dropout","recall":0.016,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"noise","recall":0.413,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"spike","recall":0.559,"group":"baselines"},{"model":"3_centralised_gru","fault_type":"stuck_at","recall":0.0,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"bias","recall":0.0,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"drift","recall":0.0,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"dropout","recall":0.007,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"noise","recall":0.41,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"spike","recall":0.584,"group":"baselines"},{"model":"5_fedavg_gru","fault_type":"stuck_at","recall":0.0,"group":"baselines"},{"model":"6_proposed","fault_type":"bias","recall":0.0,"group":"proposed"},{"model":"6_proposed","fault_type":"drift","recall":0.0,"group":"proposed"},{"model":"6_proposed","fault_type":"dropout","recall":0.09,"group":"proposed"},{"model":"6_proposed","fault_type":"noise","recall":0.28,"group":"proposed"},{"model":"6_proposed","fault_type":"spike","recall":0.534,"group":"proposed"},{"model":"6_proposed","fault_type":"stuck_at","recall":0.134,"group":"proposed"}],"operating_points":{"alert":{"recall":0.315,"precision":0.48,"f1":0.39,"fpr_extremes":0.091},"review":{"recall":0.575,"precision":0.066,"f1":0.118,"fpr_extremes":0.61},"by_magnitude":[{"band":"<0.5\u03c3","alert":0.139,"review":0.288},{"band":"0.5\u20131\u03c3","alert":0.134,"review":0.378},{"band":"1\u20132\u03c3","alert":0.13,"review":0.642},{"band":"2\u20135\u03c3","alert":0.583,"review":0.923},{"band":">5\u03c3","alert":0.924,"review":1.0}],"by_subtype":[{"subtype":"spike","alert":0.662,"review":0.946},{"subtype":"noise","alert":0.546,"review":0.93},{"subtype":"stuck_at","alert":0.136,"review":0.267},{"subtype":"dropout","alert":0.12,"review":0.45},{"subtype":"bias","alert":0.006,"review":0.494},{"subtype":"drift","alert":0.0,"review":0.132}]},"uncertainty":[{"metric":"F1","diff":0.006,"lo":-0.102,"hi":0.113,"sig":false},{"metric":"AUC-PR","diff":0.016,"lo":-0.099,"hi":0.126,"sig":false},{"metric":"recall","diff":0.041,"lo":-0.071,"hi":0.151,"sig":false},{"metric":"precision","diff":-0.166,"lo":-0.348,"hi":0.014,"sig":false}],"dataset":{"region":"Catalonia (Barcelona)","stations":7,"rows":990598,"years":"2017\u20132024","fault_rate":0.02805,"target":"NO2"},"findings":[{"title":"Privacy costs 3\u20138% of forecast accuracy","detail":"Federated training reaches 15.10/19.38/20.69 RMSE at 1/3/6h against a centralised ST-GNN ceiling of 14.62/18.10/19.21 \u2014 the price of never pooling raw data.","caveat":"Measured on one test window; not bootstrapped.","tone":"good"},{"title":"Neighbours detect faults no local model can","detail":"Stuck-at recall is 0.000 for every rung that looks only at a station's own history \u2014 including the centralised model with full raw access \u2014 and 0.134\u20130.220 for the proposed model, which uses cross-station agreement from compressed embeddings only.","caveat":"Real under time resampling; not significant when stations are also resampled, at n=7.","tone":"good"},{"title":"Accuracy is the wrong metric here","detail":"At a 2.8% fault rate a classifier answering \u201cnever faulty\u201d scores 0.977 accuracy \u2014 higher than this system's 0.976. Recall, precision and AUC-PR are what mean anything.","caveat":null,"tone":"warn"},{"title":"Drift remains unsolved","detail":"Slow calibration drift is never detected at the alert operating point. Its per-hour deviation is smaller than normal variation, so no threshold reaches it.","caveat":"Measured against an injector that drifted ~100\u00d7 faster than real co-located sensors do, so this is optimistic: the detector missed drift far coarser than the real thing. The injector is fixed; these numbers predate it.","tone":"bad"},{"title":"EEA's fault labels contain no reading","detail":"All 27,783 Validity-flagged rows carry the \u2212999 no-data sentinel, so the readings this project exists to adjudicate are absent rather than wrong. Evaluation uses rate-matched synthetic faults instead.","caveat":"Injection rate and episode durations are taken from the real data; only the corrupted value is synthesised.","tone":"warn"}]}</script>
+<script id="fd" type="application/json">{"node_set":["ES0010R","ES0014R","ES0584A","ES0692A","ES0694A","ES1018A","ES1122A","ES1123A","ES1126A","ES1148A","ES1275A","ES1312A","ES1438A","ES1453A","ES1480A","ES1666A","ES1679A","ES1814A","ES1816A","ES1851A","ES1854A","ES1856A","ES1892A","ES1910A","ES1923A","ES1929A","ES1930A","ES1948A","ES1999A","ES2034A"],"generated":"2026-10-14 01:45 UTC","stations":[{"id":"ES0010R","name":"ES0010R","klass":"rural_background","lat":42.31916999999999,"lon":3.315556},{"id":"ES0014R","name":"ES0014R","klass":"rural_background","lat":41.393333,"lon":0.734167},{"id":"ES0584A","name":"ES0584A","klass":"suburban_traffic","lat":41.48201627899999,"lon":2.188296656},{"id":"ES0691A","name":"ES0691A","klass":"urban_background","lat":41.403881851,"lon":2.204522594},{"id":"ES0692A","name":"ES0692A","klass":"urban_background","lat":41.370504108,"lon":2.114973082},{"id":"ES0694A","name":"ES0694A","klass":"suburban_background","lat":41.392157459,"lon":2.009802277},{"id":"ES0971A","name":"ES0971A","klass":"suburban_traffic","lat":41.450769339,"lon":1.9748873060000005},{"id":"ES1018A","name":"ES1018A","klass":"urban_traffic","lat":41.556115398,"lon":2.007401267},{"id":"ES1117A","name":"ES1117A","klass":"suburban_background","lat":41.1121,"lon":1.1518},{"id":"ES1120A","name":"ES1120A","klass":"suburban_industrial","lat":41.11588052599999,"lon":1.191975478},{"id":"ES1122A","name":"ES1122A","klass":"rural_industrial","lat":41.19358724099999,"lon":1.236702825},{"id":"ES1123A","name":"ES1123A","klass":"suburban_industrial","lat":41.15492354399999,"lon":1.2177176880000002},{"id":"ES1124A","name":"ES1124A","klass":"suburban_traffic","lat":41.159450058,"lon":1.239703719},{"id":"ES1125A","name":"ES1125A","klass":"urban_traffic","lat":41.730280261,"lon":1.825306423},{"id":"ES1126A","name":"ES1126A","klass":"suburban_background","lat":41.47559999999999,"lon":1.9232},{"id":"ES1135A","name":"ES1135A","klass":"suburban_industrial","lat":41.5776,"lon":1.6259},{"id":"ES1148A","name":"ES1148A","klass":"urban_traffic","lat":41.4256,"lon":2.2222},{"id":"ES1208A","name":"ES1208A","klass":"suburban_traffic","lat":41.150778895,"lon":1.120171923},{"id":"ES1215A","name":"ES1215A","klass":"suburban_background","lat":40.706708761,"lon":0.581651482},{"id":"ES1225A","name":"ES1225A","klass":"urban_traffic","lat":41.61580000000001,"lon":0.6157},{"id":"ES1231A","name":"ES1231A","klass":"urban_background","lat":41.476769365,"lon":2.088977264},{"id":"ES1262A","name":"ES1262A","klass":"urban_traffic","lat":41.561175397,"lon":2.101405057},{"id":"ES1275A","name":"ES1275A","klass":"suburban_background","lat":41.689049442,"lon":2.495746675},{"id":"ES1311A","name":"ES1311A","klass":"rural_background","lat":41.958676874,"lon":3.212854412},{"id":"ES1312A","name":"ES1312A","klass":"suburban_industrial","lat":41.103677887,"lon":1.200765062},{"id":"ES1339A","name":"ES1339A","klass":"suburban_traffic","lat":41.219036461,"lon":1.721248774},{"id":"ES1347A","name":"ES1347A","klass":"rural_background","lat":42.14326062199999,"lon":2.510206967},{"id":"ES1348A","name":"ES1348A","klass":"rural_background","lat":42.3683,"lon":1.7768},{"id":"ES1396A","name":"ES1396A","klass":"urban_background","lat":41.378802802,"lon":2.133098078},{"id":"ES1397A","name":"ES1397A","klass":"suburban_background","lat":42.00327650399999,"lon":2.287271914},{"id":"ES1438A","name":"ES1438A","klass":"urban_traffic","lat":41.385343284,"lon":2.15382196},{"id":"ES1453A","name":"ES1453A","klass":"urban_background","lat":41.447350254,"lon":2.209511187},{"id":"ES1480A","name":"ES1480A","klass":"urban_traffic","lat":41.39874325099999,"lon":2.153385124},{"id":"ES1551A","name":"ES1551A","klass":"urban_background","lat":41.512675808,"lon":2.125383709},{"id":"ES1642A","name":"ES1642A","klass":"suburban_background","lat":41.9356664,"lon":2.238568301},{"id":"ES1666A","name":"ES1666A","klass":"urban_background","lat":41.11738793399999,"lon":1.241649688},{"id":"ES1679A","name":"ES1679A","klass":"urban_background","lat":41.386413934,"lon":2.187416735},{"id":"ES1684A","name":"ES1684A","klass":"urban_background","lat":41.49208286299999,"lon":2.042497085},{"id":"ES1773A","name":"ES1773A","klass":"suburban_background","lat":41.2022,"lon":1.6722},{"id":"ES1778A","name":"ES1778A","klass":"rural_background","lat":41.77934345199999,"lon":2.358018901},{"id":"ES1812A","name":"ES1812A","klass":"rural_industrial","lat":41.27838109499999,"lon":1.179916582},{"id":"ES1814A","name":"ES1814A","klass":"suburban_traffic","lat":41.5492,"lon":2.2121},{"id":"ES1815A","name":"ES1815A","klass":"suburban_background","lat":41.34682303799999,"lon":1.6865754919999998},{"id":"ES1816A","name":"ES1816A","klass":"urban_background","lat":41.547159712,"lon":2.443253787},{"id":"ES1817A","name":"ES1817A","klass":"suburban_traffic","lat":41.526705931,"lon":2.183795315},{"id":"ES1851A","name":"ES1851A","klass":"suburban_background","lat":42.09791019299999,"lon":1.848237224},{"id":"ES1853A","name":"ES1853A","klass":"rural_background","lat":41.2449,"lon":1.6177},{"id":"ES1854A","name":"ES1854A","klass":"rural_background","lat":41.00821168,"lon":0.831084709},{"id":"ES1855A","name":"ES1855A","klass":"rural_industrial","lat":41.009505689,"lon":0.912875859},{"id":"ES1856A","name":"ES1856A","klass":"urban_background","lat":41.4260772,"lon":2.147992032},{"id":"ES1891A","name":"ES1891A","klass":"urban_traffic","lat":41.598666901,"lon":2.287117688},{"id":"ES1892A","name":"ES1892A","klass":"urban_background","lat":41.443983561,"lon":2.237875306},{"id":"ES1899A","name":"ES1899A","klass":"rural_industrial","lat":41.308402497,"lon":1.647339954},{"id":"ES1903A","name":"ES1903A","klass":"suburban_background","lat":41.31347520799999,"lon":2.013824628},{"id":"ES1910A","name":"ES1910A","klass":"suburban_background","lat":41.303112534,"lon":1.9915239570000005},{"id":"ES1923A","name":"ES1923A","klass":"rural_background","lat":41.846034209,"lon":2.217575622},{"id":"ES1929A","name":"ES1929A","klass":"suburban_background","lat":41.32149521000001,"lon":2.09772526},{"id":"ES1930A","name":"ES1930A","klass":"rural_background","lat":40.902692904,"lon":0.8097954310000001},{"id":"ES1948A","name":"ES1948A","klass":"rural_industrial","lat":40.939553197,"lon":0.831336974},{"id":"ES1964A","name":"ES1964A","klass":"suburban_industrial","lat":41.3866,"lon":2.0574},{"id":"ES1982A","name":"ES1982A","klass":"rural_background","lat":42.05134068699999,"lon":0.7295556469999999},{"id":"ES1983A","name":"ES1983A","klass":"suburban_background","lat":41.32176840499999,"lon":2.082140639},{"id":"ES1992A","name":"ES1992A","klass":"urban_background","lat":41.38748464,"lon":2.115149666},{"id":"ES1999A","name":"ES1999A","klass":"urban_traffic","lat":41.976385751,"lon":2.816547298},{"id":"ES2011A","name":"ES2011A","klass":"suburban_industrial","lat":41.400770767,"lon":1.9996347180000005},{"id":"ES2012A","name":"ES2012A","klass":"suburban_industrial","lat":41.415319291,"lon":1.990521216},{"id":"ES2017A","name":"ES2017A","klass":"rural_industrial","lat":40.552819474,"lon":0.529982528},{"id":"ES2033A","name":"ES2033A","klass":"rural_industrial","lat":41.242375047,"lon":1.859334489},{"id":"ES2034A","name":"ES2034A","klass":"rural_background","lat":41.544104651,"lon":0.829933196},{"id":"ES2090A","name":"ES2090A","klass":"suburban_background","lat":41.4184,"lon":2.1239},{"id":"ES2109A","name":"ES2109A","klass":"suburban_background","lat":41.10242999999999,"lon":1.14955}],"forecasting":{"without_met":[{"model":"1_persistence","horizon":1,"rmse":8.83726817186385,"min":8.074695309527506,"max":10.653620389260434},{"model":"1_persistence","horizon":3,"rmse":15.397955981145769,"min":14.324375663899096,"max":17.909438825187443},{"model":"1_persistence","horizon":6,"rmse":19.46677866629442,"min":17.665899838329953,"max":22.16264563778053},{"model":"2_local_gru","horizon":1,"rmse":8.023856846695319,"min":7.122503774711165,"max":9.590753956706976},{"model":"2_local_gru","horizon":3,"rmse":11.86601883583014,"min":10.393350402984227,"max":13.880224239198933},{"model":"2_local_gru","horizon":6,"rmse":13.51225352783585,"min":11.454588162778764,"max":15.497632749475718},{"model":"3_centralised_gru","horizon":1,"rmse":7.931660186992829,"min":7.046223986057425,"max":9.647059946739802},{"model":"3_centralised_gru","horizon":3,"rmse":12.092839442996937,"min":10.447917457592853,"max":14.17482927065882},{"model":"3_centralised_gru","horizon":6,"rmse":13.770008291070884,"min":11.742436872412368,"max":16.032803915842546}],"with_met":[{"model":"1_persistence","horizon":1,"rmse":8.83726817186385,"min":8.074695309527506,"max":10.653620389260434},{"model":"1_persistence","horizon":3,"rmse":15.397955981145769,"min":14.324375663899096,"max":17.909438825187443},{"model":"1_persistence","horizon":6,"rmse":19.46677866629442,"min":17.665899838329953,"max":22.16264563778053},{"model":"2_local_gru","horizon":1,"rmse":8.067475030086344,"min":7.167706475130405,"max":9.370202192070606},{"model":"2_local_gru","horizon":3,"rmse":11.70522838382788,"min":10.181492843459404,"max":13.297217230577685},{"model":"2_local_gru","horizon":6,"rmse":13.191623502262535,"min":11.108626778646842,"max":14.998461540498658},{"model":"3_centralised_gru","horizon":1,"rmse":7.98306089235372,"min":6.994331409133333,"max":9.45001846431289},{"model":"3_centralised_gru","horizon":3,"rmse":11.924318463606966,"min":10.416326057007774,"max":13.58265330482103},{"model":"3_centralised_gru","horizon":6,"rmse":13.336138767576363,"min":11.801673993213807,"max":15.131461408330006}],"scale_rmse":[{"model":"1_persistence","horizon":1,"rmse":16.26},{"model":"1_persistence","horizon":3,"rmse":23.27},{"model":"1_persistence","horizon":6,"rmse":26.32},{"model":"2_local_gru","horizon":1,"rmse":13.7},{"model":"2_local_gru","horizon":3,"rmse":16.18},{"model":"2_local_gru","horizon":6,"rmse":17.04},{"model":"3_centralised_gru","horizon":1,"rmse":13.81},{"model":"3_centralised_gru","horizon":3,"rmse":16.47},{"model":"3_centralised_gru","horizon":6,"rmse":17.12},{"model":"4_centralised_stgnn","horizon":1,"rmse":13.26},{"model":"4_centralised_stgnn","horizon":3,"rmse":15.64},{"model":"4_centralised_stgnn","horizon":6,"rmse":16.26},{"model":"5_fedavg_gru","horizon":1,"rmse":13.8},{"model":"5_fedavg_gru","horizon":3,"rmse":16.55},{"model":"5_fedavg_gru","horizon":6,"rmse":17.31},{"model":"6_proposed","horizon":1,"rmse":13.8},{"model":"6_proposed","horizon":3,"rmse":16.55},{"model":"6_proposed","horizon":6,"rmse":17.31}]},"ladder":[{"model":"1_persistence","horizon":1,"rmse":16.265,"recall":0.137,"precision":0.662,"f1":0.225,"auc_pr":0.205,"fpr_on_extremes":0.009},{"model":"1_persistence","horizon":3,"rmse":23.275,"recall":0.193,"precision":0.483,"f1":0.266,"auc_pr":0.183,"fpr_on_extremes":0.065},{"model":"1_persistence","horizon":6,"rmse":26.315,"recall":0.181,"precision":0.391,"f1":0.234,"auc_pr":0.164,"fpr_on_extremes":0.094},{"model":"2_local_gru","horizon":1,"rmse":13.696,"recall":0.188,"precision":0.701,"f1":0.295,"auc_pr":0.293,"fpr_on_extremes":0.028},{"model":"2_local_gru","horizon":3,"rmse":16.177,"recall":0.243,"precision":0.632,"f1":0.343,"auc_pr":0.342,"fpr_on_extremes":0.105},{"model":"2_local_gru","horizon":6,"rmse":17.043,"recall":0.244,"precision":0.59,"f1":0.34,"auc_pr":0.343,"fpr_on_extremes":0.125},{"model":"3_centralised_gru","horizon":1,"rmse":13.809,"recall":0.189,"precision":0.682,"f1":0.292,"auc_pr":0.28,"fpr_on_extremes":0.024},{"model":"3_centralised_gru","horizon":3,"rmse":16.474,"recall":0.239,"precision":0.663,"f1":0.343,"auc_pr":0.339,"fpr_on_extremes":0.103},{"model":"3_centralised_gru","horizon":6,"rmse":17.118,"recall":0.239,"precision":0.645,"f1":0.345,"auc_pr":0.343,"fpr_on_extremes":0.119},{"model":"4_centralised_stgnn","horizon":1,"rmse":13.262,"recall":0.217,"precision":0.734,"f1":0.342,"auc_pr":0.318,"fpr_on_extremes":0.022},{"model":"4_centralised_stgnn","horizon":3,"rmse":15.641,"recall":0.268,"precision":0.738,"f1":0.387,"auc_pr":0.37,"fpr_on_extremes":0.084},{"model":"4_centralised_stgnn","horizon":6,"rmse":16.257,"recall":0.262,"precision":0.741,"f1":0.374,"auc_pr":0.392,"fpr_on_extremes":0.122},{"model":"5_fedavg_gru","horizon":1,"rmse":13.796,"recall":0.182,"precision":0.737,"f1":0.29,"auc_pr":0.288,"fpr_on_extremes":0.019},{"model":"5_fedavg_gru","horizon":3,"rmse":16.551,"recall":0.21,"precision":0.722,"f1":0.328,"auc_pr":0.337,"fpr_on_extremes":0.082},{"model":"5_fedavg_gru","horizon":6,"rmse":17.309,"recall":0.212,"precision":0.65,"f1":0.327,"auc_pr":0.338,"fpr_on_extremes":0.107},{"model":"6_proposed","horizon":1,"rmse":13.796,"recall":0.26,"precision":0.54,"f1":0.325,"auc_pr":0.264,"fpr_on_extremes":0.017},{"model":"6_proposed","horizon":3,"rmse":16.551,"recall":0.345,"precision":0.523,"f1":0.389,"auc_pr":0.35,"fpr_on_extremes":0.13},{"model":"6_proposed","horizon":6,"rmse":17.309,"recall":0.336,"precision":0.523,"f1":0.371,"auc_pr":0.351,"fpr_on_extremes":0.126}],"subtypes":[{"group":"n7","fault_type":"bias","recall":0.0},{"group":"n7","fault_type":"drift","recall":0.0},{"group":"n7","fault_type":"dropout","recall":0.025},{"group":"n7","fault_type":"noise","recall":0.388},{"group":"n7","fault_type":"spike","recall":0.537},{"group":"n7","fault_type":"stuck_at","recall":0.022},{"group":"n30","fault_type":"bias","recall":0.017},{"group":"n30","fault_type":"drift","recall":0.014},{"group":"n30","fault_type":"dropout","recall":0.073},{"group":"n30","fault_type":"noise","recall":0.455},{"group":"n30","fault_type":"spike","recall":0.499},{"group":"n30","fault_type":"stuck_at","recall":0.06}],"drift":{"n7":{"true_positive":0,"false_positive":1,"missed":3,"precision":0.0,"recall":0.0,"buckets":{"ES0691A":3,"ES1396A":3,"ES1438A":3,"ES1480A":3,"ES1679A":3,"ES1856A":4,"ES1992A":3}},"n30":{"true_positive":11,"false_positive":5,"missed":6,"precision":0.688,"recall":0.647,"buckets":{"ES0010R":3,"ES0014R":4,"ES1018A":3,"ES1123A":2,"ES1126A":2,"ES1312A":2,"ES1438A":3,"ES1453A":4,"ES1480A":3,"ES1666A":2,"ES1679A":4,"ES1814A":2,"ES1816A":2,"ES1856A":3,"ES1948A":1,"ES1999A":3,"ES0584A":2,"ES2034A":4,"ES1122A":0,"ES0694A":2,"ES1851A":2,"ES1929A":2,"ES1923A":2,"ES1854A":2,"ES1148A":3,"ES1930A":2,"ES1892A":4,"ES1275A":3,"ES1910A":2,"ES0692A":4}}},"transfer":{"forecast":[{"region":"catalonia","horizon":1,"rmse":15.09,"mae":6.54,"mape":33.97},{"region":"catalonia","horizon":3,"rmse":19.15,"mae":9.96,"mape":55.9},{"region":"catalonia","horizon":6,"rmse":20.08,"mae":11.42,"mape":68.28},{"region":"india","horizon":1,"rmse":48.9,"mae":19.66,"mape":41.74},{"region":"india","horizon":3,"rmse":57.97,"mae":27.96,"mape":61.43},{"region":"india","horizon":6,"rmse":58.32,"mae":28.5,"mape":68.7}],"summary":{"source":"catalonia","target":"india","threshold_by_region":{"catalonia":2.473259,"india":3.022328},"threshold_shift":1.222,"n_shared_features":22,"shared_features":["NO2","cyc_hour_sin","cyc_hour_cos","cyc_dayofweek_sin","cyc_dayofweek_cos","cyc_month_sin","cyc_month_cos","is_weekend","met_temperature_c","met_relative_humidity","met_pressure_hpa","met_wind_speed_ms","met_precipitation_mm","met_wind_dir_sin","met_wind_dir_cos","NO2_lag1","NO2_lag24","NO2_lag168","NO2_rollmean6","NO2_rollstd6","NO2_rollmean24","NO2_rollstd24"]},"detection":[{"region":"catalonia","calibration":"own val-calibrated","precision":0.646,"recall":0.247,"f1":0.358,"fpr_on_extremes":0.122,"flagged":664},{"region":"catalonia","calibration":"source (catalonia) threshold","precision":0.653,"recall":0.236,"f1":0.347,"fpr_on_extremes":0.135,"flagged":626},{"region":"india","calibration":"own val-calibrated","precision":0.092,"recall":0.129,"f1":0.107,"fpr_on_extremes":0.242,"flagged":545},{"region":"india","calibration":"source (catalonia) threshold","precision":0.564,"recall":0.137,"f1":0.22,"fpr_on_extremes":0.084,"flagged":94}],"spread":[{"region":"catalonia","min":1.771,"median":2.473,"max":2.844,"spread_x":1.6},{"region":"india","min":0.564,"median":3.022,"max":15.103,"spread_x":26.8}]},"uncertainty":{"level":"stations and time resampled, horizon 3, n=30","vs_fedavg":[{"metric":"recall","diff":0.119,"lo":0.051,"hi":0.2,"sig":true},{"metric":"precision","diff":-0.191,"lo":-0.288,"hi":-0.094,"sig":true},{"metric":"F1","diff":0.059,"lo":-0.007,"hi":0.136,"sig":false},{"metric":"AUC-PR","diff":0.017,"lo":-0.051,"hi":0.097,"sig":false},{"metric":"FPR on extremes","diff":0.028,"lo":-0.006,"hi":0.056,"sig":false}],"vs_centralised":[{"metric":"recall","diff":0.071,"lo":0.015,"hi":0.116,"sig":true},{"metric":"precision","diff":-0.211,"lo":-0.269,"hi":-0.113,"sig":true},{"metric":"F1","diff":0.002,"lo":-0.034,"hi":0.045,"sig":false},{"metric":"AUC-PR","diff":-0.021,"lo":-0.086,"hi":0.038,"sig":false},{"metric":"FPR on extremes","diff":0.044,"lo":-0.004,"hi":0.064,"sig":false}],"n7_note":"At 7 stations nothing survived station resampling: recall +0.041 [-0.071, 0.151], F1 +0.006 [-0.102, 0.113]."},"operating_points":{"alert":{"recall":0.315,"precision":0.48,"f1":0.39,"fpr_extremes":0.091},"review":{"recall":0.575,"precision":0.066,"f1":0.118,"fpr_extremes":0.61},"by_magnitude":[{"band":"<0.5\u03c3","alert":0.139,"review":0.288},{"band":"0.5\u20131\u03c3","alert":0.134,"review":0.378},{"band":"1\u20132\u03c3","alert":0.13,"review":0.642},{"band":"2\u20135\u03c3","alert":0.583,"review":0.923},{"band":">5\u03c3","alert":0.924,"review":1.0}],"by_subtype":[{"subtype":"spike","alert":0.662,"review":0.946},{"subtype":"noise","alert":0.546,"review":0.93},{"subtype":"stuck_at","alert":0.136,"review":0.267},{"subtype":"dropout","alert":0.12,"review":0.45},{"subtype":"bias","alert":0.006,"review":0.494},{"subtype":"drift","alert":0.0,"review":0.132}],"note":"Measured on the 7-station build; the operating-point split has not been recomputed at 30 stations."},"dataset":{"region":"Catalonia","stations":30,"years":"2017\u20132024","fault_rate":0.02805,"target":"NO2","india_stations":7,"india_years":"2025\u20132026","device":"NVIDIA RTX 4060 (CUDA 13.0)"},"findings":[{"title":"Neighbours find faults, at a price, and both halves are real","detail":"At 30 stations the proposed model detects more faults than federated training without spatial reasoning (recall +0.119) and false-alarms more often (precision \u22120.191). Both intervals exclude zero under station and time resampling.","caveat":"F1 cannot separate them: +0.059 [\u22120.007, 0.136]. Which side matters is an operating-point choice, not a result.","tone":"good"},{"title":"Privacy costs nothing measurable in F1","detail":"Against a centralised model with full raw access, the federated model differs by +0.002 F1 [\u22120.034, 0.045] \u2014 statistically indistinguishable, while never seeing a raw neighbour reading.","caveat":"It does trade precision for recall against that ceiling too, and forecasting still pays 4\u20137% RMSE.","tone":"good"},{"title":"Seven stations were too few to conclude anything","detail":"The same comparison at 7 stations gave recall +0.041 [\u22120.071, 0.151] \u2014 an interval straddling zero. Nothing survived station-level resampling until the node set reached 30.","caveat":null,"tone":"warn"},{"title":"Federation does not help forecasting here","detail":"Purely local per-station models beat the federated global model at every horizon (13.70/16.18/17.04 against 13.80/16.55/17.31 RMSE). Across 30 heterogeneous stations, one shared forecaster is worse than many local ones.","caveat":"Federation earns its place through the spatial half, not through weight sharing.","tone":"bad"},{"title":"Accuracy is the wrong metric here","detail":"At a 2.8% fault rate a classifier answering \u201cnever faulty\u201d scores 0.972 accuracy \u2014 higher than this system. Recall, precision and AUC-PR are what mean anything.","caveat":null,"tone":"warn"},{"title":"Drift is detectable per station, not per reading","detail":"A coarse ordinal level summary, uploaded once per station per round, identifies drifting stations with 0.688 precision and 0.647 recall at 30 stations. Per-reading drift recall remains ~0.01.","caveat":"It failed completely at 7 stations: all seven sat in the same bucket, because one city's stations co-move. The detector needs dispersion among neighbours, not just neighbours.","tone":"good"},{"title":"EEA's fault labels contain no reading","detail":"All 27,783 Validity-flagged rows carry the \u2212999 no-data sentinel, so the readings this project exists to adjudicate are absent rather than wrong. Evaluation uses rate-matched synthetic faults instead.","caveat":"Injection rate (2.805%) and episode durations are taken from the real data; only the corrupted value is synthesised.","tone":"warn"},{"title":"Transferring to Delhi breaks calibration, not forecasting","detail":"A Catalonia-trained model applied to Delhi unchanged holds its relative forecast error (MAPE 68.7% against 68.3% at 6h), but per-station thresholds span 27\u00d7 there versus 1.6\u00d7 in Catalonia.","caveat":"Delhi detects better with Catalonia's threshold (precision 0.564) than its own (0.092) \u2014 its validation window is too short to calibrate stably.","tone":"bad"}]}</script>
 <script>
 const D = JSON.parse(document.getElementById('fd').textContent);
 const NS = 'http://www.w3.org/2000/svg';
-const NODE_SET = new Set(['ES0691A','ES1396A','ES1438A','ES1480A','ES1679A','ES1856A','ES1992A']);
+const NODE_SET = new Set(D.node_set || []);
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const KNOWN_CLASS = new Set(['urban_traffic','urban_background','suburban_background']);
 
@@ -257,14 +292,17 @@ function svgRoot(w, h, label){
 /* ---------- header ---------- */
 const ds = D.dataset;
 document.getElementById('facts').innerHTML = [
-  ['Stations', ds.stations], ['Hourly readings', ds.rows.toLocaleString('en-GB')],
-  ['Years', ds.years], ['Pollutant', 'NO₂'],
+  ['Stations', ds.stations],
+  ['Years', ds.years],
+  ['Pollutant', 'NO₂'],
   ['Real fault rate', (ds.fault_rate*100).toFixed(2) + '%'],
-].map(([k,v]) => `<div class="fact"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+  ['Transfer set', ds.india_stations + ' Delhi, ' + ds.india_years],
+].filter(([,v]) => v != null && v !== 'undefined')
+ .map(([k,v]) => `<div class="fact"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
 document.getElementById('stamp').textContent = 'Generated ' + D.generated;
 
 /* ---------- findings ---------- */
-document.getElementById('findings').innerHTML = D.findings.map(f => `
+document.getElementById('findings').innerHTML = (D.findings || []).map(f => `
   <article class="finding ${esc(f.tone)}">
     <h3>${esc(f.title)}</h3>
     <p>${esc(f.detail)}</p>
@@ -346,6 +384,7 @@ function groupedBars(mountId, rows, series, opts){
 
 /* ---------- forecast error ---------- */
 (function(){
+  if (!D.forecasting) return;
   const want = {'1_persistence':'Persistence','2_local_gru':'Local GRU',
                 '3_centralised_gru':'Centralised GRU'};
   const byH = {};
@@ -374,7 +413,7 @@ function groupedBars(mountId, rows, series, opts){
     '5_fedavg_gru':'5 · Federated GRU','6_proposed':'6 · Proposed',
     '6_proposed_split':'6 · Proposed + embedding feedback'};
   const byModel = {};
-  D.ladder.forEach(r => { (byModel[r.model] = byModel[r.model] || {})[r.horizon] = r; });
+  (D.ladder || []).forEach(r => { (byModel[r.model] = byModel[r.model] || {})[r.horizon] = r; });
   const fmt = (v,d) => (v==null || Number.isNaN(v)) ? '—' : Number(v).toFixed(d==null?3:d);
   const body = Object.keys(NAMES).filter(m=>byModel[m]).map(m => {
     const r = byModel[m];
@@ -397,26 +436,25 @@ function groupedBars(mountId, rows, series, opts){
 (function(){
   const LBL = {spike:'Spike',noise:'Noise',dropout:'Dropout',stuck_at:'Stuck sensor',
                bias:'Constant offset',drift:'Slow drift'};
-  const base = {}, prop = {};
-  D.subtypes.forEach(r => {
-    const t = r.fault_type;
-    if (r.model === '6_proposed' || r.model === '6_proposed_split')
-      prop[t] = Math.max(prop[t] == null ? 0 : prop[t], r.recall);
-    else base[t] = Math.max(base[t] == null ? 0 : base[t], r.recall);
+  const by = {};
+  (D.subtypes || []).forEach(r => {
+    (by[r.fault_type] = by[r.fault_type] || {})[r.group] = r.recall;
   });
-  const rows = Object.keys(LBL).map(k => ({label:LBL[k],
-    values:{base: base[k]||0, prop: prop[k]||0}}));
-  groupedBars('subchart', rows, [{key:'base',cls:'s0'},{key:'prop',cls:'s1'}],
+  const rows = Object.keys(LBL).filter(k => by[k]).map(k => ({
+    label: LBL[k], values: {n7: by[k].n7 || 0, n30: by[k].n30 || 0}}));
+  if (!rows.length) return;
+  groupedBars('subchart', rows, [{key:'n7',cls:'s0'},{key:'n30',cls:'s1'}],
     {dp:3, max:1, left:136, label:'Share of faults detected, by fault type'});
   document.getElementById('sublegend').innerHTML =
-    `<span><i class="s0"></i>Best model using only its own history</span>
-     <span><i class="s1"></i>Proposed, using cross-station agreement</span>
-     <span>Share of faults detected · 1 hour ahead</span>`;
+    `<span><i class="s0"></i>7 stations</span>
+     <span><i class="s1"></i>30 stations</span>
+     <span>Share of faults detected &middot; 1 hour ahead &middot; mean across models</span>`;
 })();
 
 /* ---------- operating points ---------- */
 (function(){
-  const op = D.operating_points;
+  const op = D.operating_points || {};
+  if (!op.by_magnitude || !op.by_subtype) return;
   const LBL = {spike:'Spike',noise:'Noise',stuck_at:'Stuck sensor',dropout:'Dropout',
                bias:'Constant offset',drift:'Slow drift'};
   const series = [{key:'a',cls:'s-alert'},{key:'b',cls:'s-review'}];
@@ -432,11 +470,77 @@ function groupedBars(mountId, rows, series, opts){
      <span>σ is the station's own typical variation</span>`;
 })();
 
+/* ---------- drift identification ---------- */
+(function(){
+  const d = D.drift || {};
+  const order = [['n7','7 stations'],['n30','30 stations']];
+  const body = order.filter(([k]) => d[k]).map(([k,label]) => {
+    const r = d[k];
+    const fmt = v => (v == null ? '--' : Number(v).toFixed(3));
+    return `<tr><td>${esc(label)}</td>
+      <td class="num">${r.true_positive}</td>
+      <td class="num">${r.false_positive}</td>
+      <td class="num">${r.missed}</td>
+      <td class="num">${fmt(r.precision)}</td>
+      <td class="num">${fmt(r.recall)}</td></tr>`;
+  }).join('');
+  const t = document.getElementById('drifttable');
+  if (t) t.innerHTML = `<thead><tr><th>Node set</th><th>Correctly flagged</th>
+    <th>False alarms</th><th>Missed</th><th>Precision</th><th>Recall</th></tr></thead>
+    <tbody>${body}</tbody>
+    <caption>Stations, not readings: one indicator per station per round can identify a drifting
+     instrument but cannot say which of its readings are wrong. At seven stations the method fails
+     outright -- all seven sat in the same band, because stations inside one city move together.
+     It needs spread among neighbours, not merely neighbours.</caption>`;
+})();
+
+/* ---------- transfer to Delhi ---------- */
+(function(){
+  const tr = D.transfer || {};
+  const fc = tr.forecast || [];
+  if (fc.length){
+    const byRegion = {};
+    fc.forEach(r => { (byRegion[r.region] = byRegion[r.region] || {})[r.horizon] = r; });
+    const body = Object.keys(byRegion).sort().map(reg => {
+      const r = byRegion[reg];
+      const cell = (h, k) => (r[h] && r[h][k] != null ? Number(r[h][k]).toFixed(1) : '--');
+      return `<tr><td>${esc(reg)}</td>
+        <td class="num">${cell(1,'rmse')}</td><td class="num">${cell(6,'rmse')}</td>
+        <td class="num">${cell(1,'mape')}%</td><td class="num">${cell(6,'mape')}%</td></tr>`;
+    }).join('');
+    document.getElementById('transfertable').innerHTML =
+      `<thead><tr><th>Region</th><th>RMSE 1h</th><th>RMSE 6h</th>
+        <th>MAPE 1h</th><th>MAPE 6h</th></tr></thead><tbody>${body}</tbody>
+       <caption>Absolute error is ~3x larger in Delhi because its pollution is higher. In relative
+        terms the model transfers almost unchanged at the 6-hour horizon.</caption>`;
+  }
+  const det = tr.detection || [];
+  if (det.length){
+    const body = det.map(r => `<tr><td>${esc(r.region)}</td><td>${esc(r.calibration)}</td>
+      <td class="num">${Number(r.precision).toFixed(3)}</td>
+      <td class="num">${Number(r.recall).toFixed(3)}</td>
+      <td class="num">${Number(r.f1).toFixed(3)}</td></tr>`).join('');
+    document.getElementById('transferdet').innerHTML =
+      `<thead><tr><th>Region</th><th>Threshold</th><th>Precision</th><th>Recall</th>
+        <th>F1</th></tr></thead><tbody>${body}</tbody>
+       <caption>Delhi does better with Catalonia's threshold than with one fitted to its own
+        validation window, which is too short to estimate a rare-event threshold stably.</caption>`;
+  }
+})();
+
 /* ---------- confidence intervals ---------- */
 (function(){
-  const rows = D.uncertainty;
+  const U = D.uncertainty || {};
+  const note = document.getElementById('cinote');
+  if (note && U.n7_note) note.textContent = U.n7_note;
+  drawCI('cichart', U.vs_fedavg || []);
+  drawCI('cichart2', U.vs_centralised || []);
+})();
+
+function drawCI(mountId, rows){
+  (function(){
   if (!rows || !rows.length) return;
-  const W=820, rowH=42, pad={l:112,r:34,t:30,b:32};
+  const W=430, rowH=40, pad={l:124,r:30,t:30,b:30};
   const H = pad.t + pad.b + rows.length*rowH;
   const lim = Math.max(...rows.flatMap(r => [Math.abs(r.lo), Math.abs(r.hi)])) * 1.5;
   const x = v => pad.l + (v+lim)/(2*lim)*(W-pad.l-pad.r);
@@ -456,6 +560,7 @@ function groupedBars(mountId, rows, series, opts){
   });
   [-lim*0.7, 0, lim*0.7].forEach(v => s.appendChild(
     el('text',{class:'axis',x:x(v),y:H-pad.b+18,'text-anchor':'middle'}, v.toFixed(2))));
-  document.getElementById('cichart').appendChild(s);
-})();
+  document.getElementById(mountId).appendChild(s);
+  })();
+}
 </script>

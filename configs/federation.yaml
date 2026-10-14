@@ -27,7 +27,7 @@ train:
 # every region gets equal aggregate weight regardless of station count, split
 # evenly among that region's own stations.
 aggregation:
-  scheme: region_first        # region_first | sample_count | uniform | clustered
+  scheme: clustered          # region_first | sample_count | uniform | clustered
   # clustered = Hammad et al. (2026) Communities of Interest. The §5.7 stretch
   # version, now implemented: with a single region, region_first degenerates to
   # uniform, so at 69 Catalan stations a dense cluster of city-centre traffic
