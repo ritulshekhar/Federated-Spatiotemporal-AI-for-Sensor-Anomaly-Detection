@@ -37,6 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
 from src.evaluation.metrics import (
     calibrate_threshold, extreme_mask, residual_score, volatility_scaled_score,
@@ -464,23 +465,64 @@ def align_features(stations: list[StationData]) -> tuple[list[str], dict[str, np
 # ---------------------------------------------------------------------------
 # Rungs 4-6 — Phase 2
 # ---------------------------------------------------------------------------
+class AlignedWindows(torch.utils.data.Dataset):
+    """Cross-station windows assembled per sample, never materialised whole.
+
+    The dense form of this is (origins, stations, hours, features) float32,
+    which at 69 stations is **6.64 GiB for the training split alone** -- a
+    duplicate of per-station arrays already resident, which is what killed the
+    first full-network run. Each station's windows stay where they are and a
+    sample is gathered on access, so a batch of 128 costs ~19 MB and peak
+    memory does not move.
+
+    ``positions[i, s]`` is the row of station ``s``'s own array holding origin
+    ``i``, or -1 when that station did not report the hour. ``mask`` says the
+    same thing as a boolean, and the model needs it: features are z-scored, so
+    the zero fill IS the station's own training mean, and an unmasked model
+    reads "absent" as "perfectly average".
+    """
+
+    def __init__(self, stations, per_station_idx, split, positions, mask, common):
+        self.X = [st.splits[split].X for st in stations]
+        self.y = [st.splits[split].y for st in stations]
+        self.cols = [per_station_idx[st.station_id] for st in stations]
+        self.positions = positions
+        self.mask = mask
+        self.common = common
+        self.n_stations = len(stations)
+        self.L = stations[0].splits[split].X.shape[1]
+        self.H = stations[0].splits[split].y.shape[1]
+        self.n_feat = len(self.cols[0])
+
+    def __len__(self):
+        return len(self.common)
+
+    def __getitem__(self, i):
+        x = np.zeros((self.n_stations, self.L, self.n_feat), dtype=np.float32)
+        y = np.zeros((self.n_stations, self.H), dtype=np.float32)
+        m = self.mask[i]
+        for s in range(self.n_stations):
+            if m[s]:
+                r = self.positions[i, s]
+                x[s] = self.X[s][r][:, self.cols[s]]
+                y[s] = self.y[s][r]
+        return (torch.from_numpy(x), torch.from_numpy(y),
+                torch.from_numpy(np.ascontiguousarray(m)))
+
+
 def _aligned_windows(stations: list[StationData], per_station_idx: dict,
                      split: str, min_fraction: float = 0.6):
-    """(n, n_stations, L, F) inputs, (n, n_stations, H) targets, and a mask.
+    """Lazy cross-station alignment: a Dataset, the origins, positions, mask.
 
     Originally this required a window origin present at *every* station, which
     is clean but does not survive a real network: across 69 Catalan stations
     **no hour at all** is reported by all of them, so rungs 4 and 6 simply
-    could not run. The intersection shrinks steadily with node count -- 100% of
-    origins at 15 stations, 86% at 30, 57% at 50, zero at 69.
+    could not run. The intersection holds 100% of origins at 15 stations, 86%
+    at 30, 57% at 50, and zero at 69.
 
-    So an hour now qualifies when at least ``min_fraction`` of stations
-    reported it. Absent stations are zero-filled and flagged in the returned
-    boolean mask ``(n, n_stations)``; the model must use that mask rather than
-    treat a zero as a measurement, and the loss must ignore absent entries.
-    Zero is not neutral here -- the features are z-scored, so zero is each
-    station's own training mean, and an unmasked model would read "absent" as
-    "perfectly average".
+    An hour now qualifies when at least ``min_fraction`` of stations reported
+    it, and the result is returned as an :class:`AlignedWindows` dataset rather
+    than a dense array -- see its docstring for why.
     """
     t0s = [st.splits[split].t0 for st in stations]
     counts: dict = {}
@@ -500,34 +542,37 @@ def _aligned_windows(stations: list[StationData], per_station_idx: dict,
     log.info("%s: %s origin(s) reported by >=%d of %d stations (%s reported by "
              "all)", split, f"{common.size:,}", need, len(stations), f"{full:,}")
 
-    X, y, positions, mask = [], [], {}, []
-    n_feat = len(next(iter(per_station_idx.values())))
-    L = stations[0].splits[split].X.shape[1]
-    H = stations[0].splits[split].y.shape[1]
+    positions = np.full((common.size, len(stations)), -1, dtype=np.int64)
+    mask = np.zeros((common.size, len(stations)), dtype=bool)
+    per_station_pos = {}
+    for s, st in enumerate(stations):
+        t0 = st.splits[split].t0
+        order = np.argsort(t0)
+        sorted_t0 = t0[order]
+        slot = np.clip(np.searchsorted(sorted_t0, common), 0,
+                       max(len(sorted_t0) - 1, 0))
+        present = sorted_t0[slot] == common
+        pos = order[slot]
+        positions[:, s] = np.where(present, pos, -1)
+        mask[:, s] = present
+        per_station_pos[st.station_id] = positions[:, s]
 
-    for st in stations:
-        ws = st.splits[split]
-        order = np.argsort(ws.t0)
-        sorted_t0 = ws.t0[order]
-        slot = np.searchsorted(sorted_t0, common)
-        slot_clipped = np.clip(slot, 0, max(len(sorted_t0) - 1, 0))
-        present = sorted_t0[slot_clipped] == common
+    ds = AlignedWindows(stations, per_station_idx, split, positions, mask, common)
+    return ds, common, per_station_pos, mask
 
-        pos = order[slot_clipped]
-        positions[st.station_id] = np.where(present, pos, -1)
 
-        xi = np.zeros((common.size, L, n_feat), dtype=ws.X.dtype)
-        yi = np.zeros((common.size, H), dtype=ws.y.dtype)
-        if present.any():
-            take = pos[present]
-            xi[present] = ws.X[take][:, :, per_station_idx[st.station_id]]
-            yi[present] = ws.y[take]
-        X.append(xi)
-        y.append(yi)
-        mask.append(present)
+def _graph_sample(dataset, max_origins: int = 2000) -> np.ndarray:
+    """(origins, stations, features) for correlation-based graph building.
 
-    return (np.stack(X, axis=1), np.stack(y, axis=1), common, positions,
-            np.stack(mask, axis=1))
+    Subsampled on purpose: the adjacency only needs enough origins to estimate
+    inter-station correlation, and using every one would rebuild the dense
+    tensor this Dataset exists to avoid.
+    """
+    n = len(dataset)
+    step = max(1, n // max_origins)
+    rows = [dataset[i][0].numpy().reshape(dataset.n_stations, -1)
+            for i in range(0, n, step)]
+    return np.stack(rows, axis=0)
 
 
 def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
@@ -554,6 +599,7 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
     log.info("rung 4: %d common feature(s), %s/%s/%s aligned windows",
              len(common_features), f"{len(data['train'][0]):,}",
              f"{len(data['val'][0]):,}", f"{len(data['test'][0]):,}")
+    # data[split] = (dataset, common_t0, positions_per_station, mask)
 
     gcfg = model_cfg["server_gnn"]
     adjacency = build_adjacency(
@@ -561,9 +607,10 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
         distance_km_threshold=gcfg["graph"]["distance_km_threshold"],
         # build_adjacency averages the trailing axis per station, so flatten
         # each station's (hours x features) window into one vector.
+        # Correlation-mode graphs need station vectors; building them from a
+        # sample of origins keeps this off the 6.6 GiB dense path.
         hidden_states=(None if gcfg["graph"]["mode"] == "distance" else
-                       data["train"][0].reshape(len(data["train"][0]),
-                                                len(stations), -1)),
+                       _graph_sample(data["train"][0])),
         correlation_threshold=gcfg["graph"]["correlation_threshold"],
         self_loops=True,      # forecasting: a station's own history is allowed
     )
@@ -575,15 +622,12 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
         target_index=common_features.index(target),
     )
     history = train_stgnn(
-        model, data["train"][0], data["train"][1],
-        data["val"][0], data["val"][1],
-        mask_train=data["train"][4], mask_val=data["val"][4],
+        model, data["train"][0], data["val"][0],
         **{k: v for k, v in model_cfg.get("centralised_gru", {}).get("train", {}).items()
            if k in ("epochs", "lr", "batch_size", "grad_clip")},
     )
 
-    preds = {s: predict(model, data[s][0], mask=data[s][4])
-             for s in ("val", "test")}
+    preds = {s: predict(model, data[s][0]) for s in ("val", "test")}
 
     records, thresholds = [], {}
     for i, st in enumerate(stations):
@@ -596,8 +640,8 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
             # A station absent for an aligned hour has position -1 and no
             # prediction to scatter; leaving those NaN keeps them out of
             # scoring rather than writing a zero-filled forecast back.
-            pos = data[split][3][st.station_id]
-            present = data[split][4][:, i]
+            pos = data[split][2][st.station_id]
+            present = data[split][3][:, i]
             if present.any():
                 arr[pos[present]] = preds[split][present, i, :]
             full[split] = arr

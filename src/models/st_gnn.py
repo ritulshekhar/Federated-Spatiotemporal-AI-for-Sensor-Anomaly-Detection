@@ -130,14 +130,19 @@ class STGNNHistory:
                 "stopped_early": self.stopped_early}
 
 
-def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarray,
-                X_val: np.ndarray, y_val: np.ndarray, epochs: int = 40,
-                lr: float = 1e-3, batch_size: int = 128, patience: int = 6,
-                grad_clip: float = 1.0,
+def train_stgnn(model: SpatioTemporalGNN, train_set, val_set,
+                epochs: int = 40, lr: float = 1e-3, batch_size: int = 128,
+                patience: int = 6, grad_clip: float = 1.0,
                 device: str | None = "auto",
-                mask_train: np.ndarray | None = None,
-                mask_val: np.ndarray | None = None) -> STGNNHistory:
-    """Joint training over every station at once — the centralised privilege."""
+                num_workers: int = 0) -> STGNNHistory:
+    """Joint training over every station at once, the centralised privilege.
+
+    Takes torch Datasets rather than dense arrays. The dense cross-station
+    tensor is (origins, stations, hours, features), which at 69 stations is
+    6.64 GiB for training alone and duplicates per-station arrays that are
+    already resident; assembling each batch instead keeps peak memory flat.
+    Each item is ``(x, y, mask)``, the mask marking stations that reported.
+    """
     dev = resolve_device(device)
     model.to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -145,17 +150,12 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
     history = STGNNHistory()
     best_state, stale = None, 0
 
-    def loader(X, y, m, shuffle):
-        if m is None:
-            m = np.ones(y.shape[:2], dtype=bool)
-        ds = torch.utils.data.TensorDataset(
-            torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)),
-            torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32)),
-            torch.from_numpy(np.ascontiguousarray(m, dtype=bool)))
-        return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
+    def loader(ds, shuffle):
+        return torch.utils.data.DataLoader(
+            ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
-    train_loader = loader(X_train, y_train, mask_train, True)
-    val_loader = loader(X_val, y_val, mask_val, False)
+    train_loader = loader(train_set, True)
+    val_loader = loader(val_set, False)
 
     def masked_mse(pred, target, m):
         """Mean squared error over present (sample, station) pairs only.
@@ -218,21 +218,18 @@ def train_stgnn(model: SpatioTemporalGNN, X_train: np.ndarray, y_train: np.ndarr
     return history
 
 
-def predict(model: SpatioTemporalGNN, X: np.ndarray,
-            batch_size: int = 256, mask: np.ndarray | None = None) -> np.ndarray:
+def predict(model: SpatioTemporalGNN, dataset,
+            batch_size: int = 256) -> np.ndarray:
+    """Forecasts for every origin in ``dataset``, in its own order."""
     model.eval()
     # Follow the model rather than re-resolving: after training it already
     # lives wherever it was trained, and moving it back would be silent waste.
     dev = next(model.parameters()).device
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
+                                         shuffle=False)
     out = []
     with torch.no_grad():
-        for start in range(0, len(X), batch_size):
-            batch = torch.from_numpy(
-                np.ascontiguousarray(X[start:start + batch_size], dtype=np.float32))
-            mb = None
-            if mask is not None:
-                mb = torch.from_numpy(np.ascontiguousarray(
-                    mask[start:start + batch_size], dtype=bool)).to(dev)
-            out.append(model(batch.to(dev), mb).cpu().numpy())
+        for xb, _, mb in loader:
+            out.append(model(xb.to(dev), mb.to(dev)).cpu().numpy())
     return (np.concatenate(out, axis=0) if out
             else np.empty((0, 0, model.horizon), dtype=np.float32))

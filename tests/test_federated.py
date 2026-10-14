@@ -371,10 +371,18 @@ def test_masked_alignment_keeps_hours_the_strict_rule_would_drop():
                 _St("C", [0, 1, 3])]          # C is missing hour 2
     idx = {s.station_id: np.arange(3) for s in stations}
 
-    X, y, common, pos, mask = _aligned_windows(stations, idx, "train",
-                                               min_fraction=0.6)
+    ds, common, pos, mask = _aligned_windows(stations, idx, "train",
+                                             min_fraction=0.6)
     assert len(common) == 4, "the strict rule would have dropped hour 2"
     assert mask.shape == (4, 3)
     assert mask[:, 2].sum() == 3 and not mask[2, 2], "C should be absent at hour 2"
-    assert (X[2, 2] == 0).all(), "an absent station must be zero-filled"
     assert pos["C"][2] == -1, "an absent station needs no scatter position"
+
+    # The dataset assembles samples on access rather than materialising the
+    # dense (origins, stations, hours, features) tensor, which is the whole
+    # point: at 69 stations that tensor is 6.64 GiB and duplicates arrays that
+    # are already resident.
+    x_i, y_i, m_i = ds[2]
+    assert x_i.shape == (3, 4, 3) and m_i.tolist() == [True, True, False]
+    assert float(x_i[2].abs().sum()) == 0.0, "absent station must be zero-filled"
+    assert float(x_i[0].abs().sum()) > 0.0, "present station must carry data"
