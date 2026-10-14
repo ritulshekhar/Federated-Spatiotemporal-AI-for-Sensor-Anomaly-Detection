@@ -2708,3 +2708,107 @@ not:
 Nearly every large fault is caught; roughly one sub-0.5σ fault in eleven is.
 That spread — a factor of ten across magnitude bands — is why a single headline
 recall number was always misleading.
+
+---
+
+## [2026-10-14] entry 29 — real fault labels at last, and they corroborate the synthetic ones
+
+`outputs/phase9_colocated_real`. §2.1a's recommended stretch goal, and the
+first time this project has measured anything against a fault that actually
+happened rather than one it injected.
+
+### The data
+
+H2020 CAPTOR (Zenodo 2564825), Catalonia, summer 2018. A low-cost MOX ozone
+sensor sits beside an EEA reference instrument measuring the same air, so when
+the cheap one is wrong you know it is wrong **and by how much**. That is a
+plausible-but-wrong reading with ground truth attached — exactly what EEA's
+`Validity` flags cannot give, because the flagged reading is replaced by the
+−999 sentinel (entry 4).
+
+Four pairs within 150 m. **ES1892A was excluded**: at 1.84 km its
+sensor-reference difference includes genuine spatial variation in ozone rather
+than sensor error, and its 11.08% "fault" rate against 0.77–5.32% elsewhere is
+the tell.
+
+| station | rows | faults | rate |
+|---|---|---|---|
+| ES1397A | 1,699 | 35 | 0.0206 |
+| ES1642A | 2,132 | 42 | 0.0197 |
+| ES1679A | 696 | 53 | 0.0761 |
+| ES1923A | 1,306 | 33 | 0.0253 |
+
+### What counts as a real fault
+
+A low-cost sensor is *always* somewhat wrong — pooled MAE 15.7–19.8 µg/m³
+against a reference sigma of 31–45 — so "fault" is not a natural binary. The
+threshold is **rate-matched** to the measured EEA rate of 2.805%, the same
+constant §2.7 locks the injector to, which lands at **|error| > 1.183 σ** and
+yields 2.79%. Matching the rate is what makes real and synthetic numbers
+comparable; different prevalence would move precision for reasons unrelated to
+the detector.
+
+### The finding that matters most, visible before any model ran
+
+**Real sensor errors are concentrated in exactly the band synthetic evaluation
+found hardest.** Median magnitude 1.34 σ, maximum 3.07. Nothing above 5 σ,
+where the detector reaches 0.946.
+
+Synthetic evaluation had already measured recall in the 1–2 σ band at **0.211**
+(alert) and **0.549** (review). So the prediction, made before touching this
+data, was that real faults would be caught somewhere in that range.
+
+### Measured
+
+Pooled over the four stations, h=1, **16 real faults in the test split**:
+
+| model | detected | recall | 95% CI (Clopper-Pearson) |
+|---|---|---|---|
+| persistence | 0/16 | 0.000 | [0.000, 0.206] |
+| local GRU | 5/16 | 0.312 | [0.110, 0.587] |
+| **proposed** | **6/16** | **0.375** | [0.152, 0.646] |
+
+**0.375 falls inside the 0.211–0.549 range the synthetic evaluation predicted
+for faults of this magnitude.** That is the single most useful thing in this
+entry: the synthetic methodology, which §2.1a adopted reluctantly and which
+weakens the headline claim, **was not misleading about difficulty**. It
+predicted the real detection rate for faults of a given size, and the real
+faults landed where it said they would.
+
+### And one result that is unambiguously bad
+
+On ES1923A, the only station carrying meaningful fault mass (13 of 16):
+
+| model | recall | precision | F1 | FPR on extremes |
+|---|---|---|---|---|
+| local GRU | 0.308 | 0.267 | 0.286 | **0.000** |
+| proposed | 0.385 | 0.139 | 0.204 | **0.800** |
+
+The proposed model flags **80% of genuine extreme readings as faults**. That is
+the Gupchup (2019) failure mode in full, and worse than anything measured on
+synthetic data. The spatial mechanism has three neighbours here, with poor
+temporal overlap between their records, so the neighbourhood consensus it
+depends on is close to meaningless — consistent with entry 24's finding that
+the mechanism needs dispersion *and* enough neighbours, and a direct warning
+against deploying it on a small cluster.
+
+### Caveats, which are large
+
+* **16 faults.** One detection moves recall by 6 points, and the intervals
+  above span a factor of four. Indicative, not conclusive.
+* **O₃, not NO₂.** The low-cost sensors measure ozone; the Catalan node set
+  targets NO₂. Fault *mechanisms* should transfer, pollutant chemistry does not.
+* **Summer 2018 only**, 84–302 test windows per station.
+* The chronological split (§2.3, LOCKED) put most faults outside test: 163
+  faults in the full record, 16 in the test window.
+
+### What this does and does not license
+
+It **does** license saying the synthetic evaluation is calibrated — its
+magnitude-stratified predictions held against real errors. It does **not**
+license a headline real-fault recall figure; the sample is too small, and the
+honest summary is "consistent with synthetic, at n=16".
+
+Closing this properly needs a larger co-located deployment, ideally on NO₂ and
+across more than one season. The machinery now exists
+(`src/data/colocated_labels.py`), so adding data is the only missing piece.

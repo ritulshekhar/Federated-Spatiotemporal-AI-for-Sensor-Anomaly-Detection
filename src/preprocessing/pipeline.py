@@ -461,11 +461,22 @@ def main() -> None:
                     help="also inject rate-matched synthetic faults (§6.7). "
                          "Supplementary stress test only — never the headline metric.")
     ap.add_argument("--dry-run", action="store_true", help="do not write outputs")
+    ap.add_argument("--target", default=None,
+                    help="override preprocessing.target_pollutant. Needed for "
+                         "the co-located set, whose sensors measure O3 while "
+                         "the Catalan node set targets NO2.")
     ap.add_argument("--variant", default=None,
                     help="processed-build subdirectory (default: 'injected' when "
                          "--inject-synthetic is set, otherwise the clean root)")
     args = ap.parse_args()
 
+    if args.target:
+        # Mutating the loaded config rather than threading a parameter through
+        # every stage: the target pollutant is read in a dozen places and this
+        # keeps the override in one visible spot.
+        cfg = load_config("data")
+        cfg["preprocessing"]["target_pollutant"] = args.target
+        log.info("target pollutant overridden to %r for this run", args.target)
     summary = run(args.region, inject_synthetic=args.inject_synthetic,
                   stations=args.stations, write=not args.dry_run,
                   variant=args.variant)
