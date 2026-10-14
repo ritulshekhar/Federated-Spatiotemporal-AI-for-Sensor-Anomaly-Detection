@@ -2274,3 +2274,126 @@ going to decide it quietly:
 So the recorded status of Objective-4-for-drift is: **still unsolved**, now for
 a precisely understood reason, with a candidate fix that needs an explicit
 decision about cumulative disclosure before it is built.
+
+---
+
+## [2026-10-14] entry 24 — the scale-up answers entry 16, and the dGPU answers why it took so long
+
+`outputs/phase5_scale30`: 30 Catalan stations, rungs 1-6, corrected drift
+injector, meteorology on, split learning off, trained on an RTX 4060. Clean
+completion, zero tracebacks, ~90 minutes.
+
+### First: everything had been training on CPU for no reason
+
+`torch 2.14.0+cpu` was installed on a machine with an idle RTX 4060, so
+`torch.cuda.is_available()` was False and both ~18-hour runs were CPU-bound.
+Swapped to `torch 2.14.0+cu130` — same torch version, so a drop-in rather than
+a downgrade; `cu128` would have forced 2.11, and the driver here (610.47) is
+CUDA 13-era. `node_gru` was already device-aware and needed only its default
+changed; `st_gnn` and `server_gnn` were CPU-hardcoded and now take a device.
+
+Measured, 3 epochs on representative shapes: **node GRU 4.17s -> 0.77s (5.4x)**,
+ST-GNN 1.08s -> 0.28s (3.9x), reconstructor 0.18s -> 0.23s (slower, too small to
+amortise kernel launches — left alone). Losses agree to five decimals across
+devices, which is the check that matters.
+
+### Entry 16's question, answered: yes, at n=30
+
+The headline. Paired block bootstrap, horizon 3, **stations and time both
+resampled** — the strict test that nothing survived at n=7.
+
+`6_proposed` − `5_fedavg_gru` (does cross-station spatial reasoning help?):
+
+| metric | difference | 95% CI | excludes zero |
+|---|---|---|---|
+| **recall** | **+0.119** | [0.051, 0.200] | **yes** |
+| **precision** | **−0.191** | [−0.288, −0.094] | **yes** |
+| F1 | +0.059 | [−0.007, 0.136] | no |
+| AUC-PR | +0.017 | [−0.051, 0.097] | no |
+| FPR on extremes | +0.028 | [−0.006, 0.056] | no |
+
+At n=7 the same comparison gave F1 +0.006 [−0.102, 0.113] and recall
++0.041 [−0.071, 0.151] — nothing. At n=30 **both halves of the trade are
+established**: the spatial mechanism genuinely finds more faults, and genuinely
+false-alarms more. F1 does not distinguish them because the gain and the cost
+roughly cancel.
+
+The honest headline is therefore *not* "the proposed model is better". It is:
+**cross-station spatial reasoning trades precision for recall, and at n=30 both
+sides of that trade are real rather than noise.** Which of the two matters is an
+operating-point decision, which is exactly what entry 14's alert/review split
+exists to express.
+
+### Privacy costs nothing measurable in F1
+
+`6_proposed` − `4_centralised_stgnn` (the no-privacy ceiling), stations resampled:
+
+| metric | difference | 95% CI | excludes zero |
+|---|---|---|---|
+| recall | +0.071 | [0.015, 0.116] | yes |
+| precision | −0.211 | [−0.269, −0.113] | yes |
+| **F1** | **+0.002** | **[−0.034, 0.045]** | **no** |
+
+So the federated model, which never sees a raw neighbour reading, is
+statistically indistinguishable in F1 from the centralised model that sees
+everything. That is the §1.2 claim in its strongest available form, and it is
+stronger than the n=7 result could support.
+
+Forecasting still pays, and here the number is unflattering in a way worth
+keeping. Median RMSE across stations, 1/3/6h:
+
+| model | 1h | 3h | 6h |
+|---|---|---|---|
+| 4 centralised ST-GNN | **13.26** | **15.64** | **16.26** |
+| 2 local GRU (no federation) | 13.70 | 16.18 | 17.04 |
+| 5 FedAvg / 6 proposed | 13.80 | 16.55 | 17.31 |
+
+Privacy costs 4.1 / 5.8 / 6.5% against the ceiling. But note the middle row:
+**purely local per-station models beat the federated global model at every
+horizon.** At 30 heterogeneous Catalan stations, FedAvg's single shared model is
+worse for forecasting than letting each station keep its own. Federation earns
+its place here through the *spatial* half (recall above), not through weight
+sharing. That contradicts the usual framing and should be reported, not buried.
+
+### Subtype recall: the invisible four move off zero, barely
+
+Recall at 1h, mean across models:
+
+| subtype | n=7 | n=30 |
+|---|---|---|
+| noise | 0.388 | 0.455 |
+| spike | 0.537 | 0.499 |
+| dropout | 0.025 | 0.073 |
+| stuck_at | 0.022 | 0.060 |
+| bias | 0.000 | 0.017 |
+| drift | 0.000 | 0.014 |
+
+Every previously-zero subtype is now non-zero, and all of them remain far too
+low to call solved. Spike is the only one that got worse, and only slightly.
+
+### §2.4a works at n=30, and my n=7 diagnosis was wrong
+
+Station-level drift identification from uploaded level buckets:
+
+* **n=7:** 0 true positives, 1 false positive, 3 missed.
+* **n=30: 11 true positives, 5 false positives, 6 missed** — precision 0.688,
+  recall 0.647.
+
+Entry 23 attributed the n=7 failure to the bucket averaging only the trailing
+72 hours of a ~10,000-hour test split. That explanation predicted failure at any
+n, and it is now contradicted: the same code works at 30 stations. **The real
+cause is visible in the n=7 buckets — all seven sat at bucket 3.** Seven
+stations inside one city co-move almost perfectly, so the neighbour median moved
+with them and disagreement was 0.0 for everybody, drifting or not. At 30
+stations spread across Catalonia the median sits stably at 2 (normal) and a
+station that moves away from its own training mean stands out.
+
+So the mechanism needs *dispersion* among neighbours, not merely neighbours.
+That is a more useful finding than the window-length story, and it says
+something real about deployment: a dense single-city cluster is the worst case
+for this detector, not the best.
+
+The 5 false positives are the honest caveat. A bucket is in the station's own
+normalised units, so a flag means "this station has moved relative to its own
+history" — which is drift, or a genuine local event, or a seasonal shift that
+hits one station differently. Roughly one flag in three is not drift.
