@@ -2488,3 +2488,71 @@ years.
   target, but it is in the shared feature set.
 * `station_class` for Indian stations is inferred from siting, not official
   CPCB metadata, so the `station_class` grouping inherits that.
+
+---
+
+## [2026-10-14] entry 26 — clustered aggregation measured, and it does not earn its place
+
+`outputs/phase7_clustered30`: rungs 5 and 6 only, 30 stations, identical to
+`phase5_scale30` in every respect except the aggregation scheme. §5.7 says to
+reach for clustering "only if region_first proves insufficient". Measured, it
+has not.
+
+### The numbers
+
+Median forecast RMSE across 30 stations (both federated rungs share a
+forecaster, so the rows are identical):
+
+| horizon | region_first | clustered | change |
+|---|---|---|---|
+| 1h | 13.796 | 13.964 | +1.2% |
+| 3h | 16.551 | 16.879 | +2.0% |
+| 6h | 17.309 | 17.827 | +3.0% |
+
+Detection at horizon 3, rung 6:
+
+| metric | region_first | clustered |
+|---|---|---|
+| recall | 0.345 | 0.337 |
+| precision | 0.523 | 0.531 |
+| **F1** | **0.389** | 0.379 |
+| AUC-PR | 0.350 | 0.343 |
+| **FPR on extremes** | 0.130 | **0.093** |
+
+Worse on RMSE at every horizon, worse on F1 and AUC-PR, marginally better on
+precision, and **meaningfully better on the §8.2 false-positive control**
+(0.093 against 0.130, a 28% reduction in flagging genuine extremes).
+
+These are single-run differences with no paired bootstrap behind them — the
+uncertainty tool compares models *within* a run, and these are two runs — so
+the small ones should not be claimed. The RMSE degradation is consistent
+across all three horizons, which makes it the most believable of them.
+
+### Why it fails, which is the useful part
+
+Average-linkage clustering on public coordinates split the 30 stations into
+communities of **[18, 9, 1, 1, 1]**. Since each community carries equal
+aggregate weight, three singleton stations receive **0.200 each — 60% of the
+global model between them** — while each station in the dense 18-station
+Barcelona blob receives 0.011. That is an 18x swing against uniform.
+
+§5.7's argument was that a crowd should not outvote a lone station. At this
+community structure the rule **overcorrects into the opposite failure**: three
+outliers now dominate a model that 30 stations share, and the shared forecaster
+degrades accordingly. The mechanism is sound and the implementation does what
+it says; the equal-weight-per-community rule is simply wrong when community
+sizes are this unbalanced.
+
+Two things follow, neither implemented because both are beyond the stated plan:
+
+* Weighting communities by something sublinear in size (`sqrt(n)`) rather than
+  equally would keep the intent — a lone station is not ignored — without
+  handing 60% of the model to three stations.
+* The better-FPR result hints the real benefit may be at the *decision* layer
+  rather than the aggregation one. A diverse-by-construction neighbour set is
+  exactly what entry 24 showed the drift detector needs, so clustering may be
+  worth more as a graph-construction input than as a weighting scheme.
+
+`configs/federation.yaml` is restored to `region_first`, which remains the
+LOCKED default of §5.7. The clustered path stays implemented and tested, with
+this entry recording why it is not switched on.

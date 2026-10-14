@@ -27,7 +27,11 @@ train:
 # every region gets equal aggregate weight regardless of station count, split
 # evenly among that region's own stations.
 aggregation:
-  scheme: clustered          # region_first | sample_count | uniform | clustered
+  # Measured 2026-10-14 at 30 stations: clustered is slightly WORSE than
+  # region_first on RMSE at every horizon and on F1, so §5.7's "only if
+  # region_first proves insufficient" has not been met. See CONTEXT.md
+  # entry 26 for the numbers and the reason (unbalanced communities).
+  scheme: region_first        # region_first | sample_count | uniform | clustered
   # clustered = Hammad et al. (2026) Communities of Interest. The §5.7 stretch
   # version, now implemented: with a single region, region_first degenerates to
   # uniform, so at 69 Catalan stations a dense cluster of city-centre traffic
