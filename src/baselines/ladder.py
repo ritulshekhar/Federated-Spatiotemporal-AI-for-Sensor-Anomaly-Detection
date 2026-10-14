@@ -561,6 +561,34 @@ def _aligned_windows(stations: list[StationData], per_station_idx: dict,
     return ds, common, per_station_pos, mask
 
 
+MIN_SCOREABLE_WINDOWS = 50
+
+
+def _scoreable(full: dict, station_id: str, model: str,
+               minimum: int = MIN_SCOREABLE_WINDOWS) -> bool:
+    """Whether a station has enough aligned predictions to calibrate on.
+
+    Masked alignment lets the spatial rungs run on the whole network, but it
+    does not conjure overlap that is not there. Splits are per-station and
+    chronological (§2.3), so a station whose record spans 2017-2018 has its
+    validation window in 2018 -- and if the network's densely-reported hours
+    fall elsewhere, that station shares **no** scoreable origin with the rest.
+    Measured on the 69-station Catalan set: 6 stations have exactly zero.
+
+    Such a station cannot have a threshold calibrated for it, which is a real
+    limit rather than an error, so it is dropped from this rung's table with
+    the reason logged. §8.3 reports per station and never pools, so a station
+    that is absent from one rung's table is visible as absent.
+    """
+    n_val = int(np.isfinite(full["val"]).all(axis=1).sum())
+    if n_val >= minimum:
+        return True
+    log.warning("%s: only %d scoreable validation window(s) under the aligned "
+                "origins (need %d) -- excluded from %s", station_id, n_val,
+                minimum, model)
+    return False
+
+
 def _graph_sample(dataset, max_origins: int = 2000) -> np.ndarray:
     """(origins, stations, features) for correlation-based graph building.
 
@@ -629,7 +657,7 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
 
     preds = {s: predict(model, data[s][0]) for s in ("val", "test")}
 
-    records, thresholds = [], {}
+    records, thresholds, skipped = [], {}, []
     for i, st in enumerate(stations):
         # Scatter the aligned predictions back into each station's own window
         # order; windows the intersection dropped stay NaN and are excluded.
@@ -645,6 +673,9 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
             if present.any():
                 arr[pos[present]] = preds[split][present, i, :]
             full[split] = arr
+        if not _scoreable(full, st.station_id, "4_centralised_stgnn"):
+            skipped.append(st.station_id)
+            continue
         r, thr = score_station(st, "4_centralised_stgnn", full["val"], full["test"],
                                **score_kwargs)
         records.append(r)
@@ -653,7 +684,8 @@ def rung4_centralised_stgnn(stations: list[StationData], model_cfg: dict,
     return (pd.concat(records, ignore_index=True), thresholds,
             history.as_dict() | {"graph_edges": int(adjacency.sum()),
                                  "aligned_windows": {s: int(len(data[s][0]))
-                                                     for s in data}})
+                                                     for s in data},
+                                 "excluded_no_overlap": skipped})
 
 
 def rung5_fedavg_gru(stations: list[StationData], model_cfg: dict,
@@ -924,13 +956,20 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
     # Hidden-state uploads are real communication cost (§8.2).
     hidden_mb = sum(H[s][0].nbytes for s in ("val", "test")) / 1e6
 
-    records, thresholds = [], {}
+    records, thresholds, no_spatial = [], {}, []
     for i, (st, client) in enumerate(zip(stations, clients)):
         spatial = {
             split: pd.Series(disagreement[split][0][:, i],
                              index=pd.DatetimeIndex(disagreement[split][1]))
             for split in ("val", "test")
         }
+        # Unlike rung 4, this station still has complete forecasts of its own;
+        # only the spatial detector is empty, and the decision layer already
+        # treats an all-NaN detector as unusable. So it is scored, just
+        # without the spatial signal -- which is worth naming, because such a
+        # station is silently running as rung 5.
+        if not np.isfinite(spatial["val"].to_numpy()).any():
+            no_spatial.append(st.station_id)
         r, thr = score_station(
             st, "6_proposed",
             client.predict(global_weights, "val"),
@@ -947,6 +986,7 @@ def rung6_proposed(stations: list[StationData], model_cfg: dict, fed_cfg: dict,
         "hidden_state_upload_mb": round(hidden_mb, 3),
         "attention": reconstructor.attention().detach().cpu().numpy().round(3).tolist(),
         "station_order": station_ids,
+        "no_spatial_coverage": no_spatial,
         "drift_identification": _drift_identification(
             stations, clients, adjacency, station_ids),
     }

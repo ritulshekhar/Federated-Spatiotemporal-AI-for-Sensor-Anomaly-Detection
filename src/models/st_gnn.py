@@ -165,8 +165,14 @@ def train_stgnn(model: SpatioTemporalGNN, train_set, val_set,
         wrong and trivially easy -- it would drag the reported loss down while
         making the forecasts worse."""
         w = m.unsqueeze(-1).to(pred.dtype)
-        denom = w.sum() * pred.shape[-1] / max(pred.shape[-1], 1)
-        return ((pred - target) ** 2 * w).sum() / denom.clamp_min(1.0)
+        # Count ELEMENTS, not station-samples: the numerator sums over the
+        # horizon as well, so dividing by the pair count alone inflates the
+        # loss by exactly the horizon length. (An earlier version wrote
+        # `* H / max(H, 1)`, which cancels to 1 and did precisely that --
+        # harmless to Adam, which is near scale-invariant, but it made the
+        # reported curve incomparable with every other rung.)
+        denom = (w.sum() * pred.shape[-1]).clamp_min(1.0)
+        return ((pred - target) ** 2 * w).sum() / denom
 
     for epoch in range(epochs):
         model.train()
