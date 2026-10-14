@@ -160,7 +160,12 @@ def summarise(samples: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
     out = []
     for model, g in samples.groupby("model"):
         row = {"model": model, "n_replicates": len(g)}
-        for m in METRICS:
+        # In by_subtype mode the replicate rows carry recall_<subtype> columns
+        # instead of the headline metrics, so summarise over whatever is
+        # actually present rather than assuming METRICS.
+        present = [m for m in METRICS if m in g.columns]
+        present += sorted(c for c in g.columns if c.startswith("recall_"))
+        for m in present:
             v = g[m].dropna().to_numpy()
             if v.size == 0:
                 continue
@@ -172,16 +177,19 @@ def summarise(samples: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
 
 
 def paired_difference(samples: pd.DataFrame, model_a: str, model_b: str,
-                      alpha: float = 0.05) -> pd.DataFrame:
+                      alpha: float = 0.05,
+                      metrics: list[str] | None = None) -> pd.DataFrame:
     """Interval on (a − b) within each replicate. The test that matters.
 
     A difference whose interval excludes zero is one the data supports;
     overlapping individual intervals do not refute it, and non-overlapping ones
     are not required to establish it.
     """
-    wide = samples.pivot(index="replicate", columns="model", values=list(METRICS))
+    cols = list(metrics) if metrics else list(METRICS)
+    cols = [c for c in cols if c in samples.columns]
+    wide = samples.pivot(index="replicate", columns="model", values=cols)
     rows = []
-    for m in METRICS:
+    for m in cols:
         try:
             diff = (wide[(m, model_a)] - wide[(m, model_b)]).dropna().to_numpy()
         except KeyError:
@@ -209,6 +217,12 @@ def main() -> None:
     ap.add_argument("--block-hours", type=int, default=DEFAULT_BLOCK_HOURS)
     ap.add_argument("--level", default="both", choices=["both", "time", "stations"])
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
+    ap.add_argument("--by-subtype", action="store_true",
+                    help="also bootstrap recall per fault subtype. Worth doing "
+                         "at --level stations: the per-subtype numbers in the "
+                         "README were only ever time-resampled, so 'better at "
+                         "stuck sensors' was shown for a particular node set "
+                         "rather than established in general.")
     args = ap.parse_args()
 
     frames = []
@@ -226,21 +240,28 @@ def main() -> None:
              len(models), args.n_boot, args.block_hours, args.level)
     samples = bootstrap(records, thresholds, models, horizon=args.horizon,
                         n_boot=args.n_boot, block_hours=args.block_hours,
-                        level=args.level)
+                        level=args.level, by_subtype=args.by_subtype)
 
     print(f"\n=== 95% intervals, h={args.horizon} "
           f"({args.n_boot} replicates, {args.block_hours}h blocks) ===")
     summary = summarise(samples)
     for _, r in summary.iterrows():
         print(f"\n  {r['model']}")
-        for m in METRICS:
+        shown = list(METRICS)
+        if args.by_subtype:
+            shown += sorted(c for c in r.index
+                            if c.startswith("recall_") and not c.endswith(("_lo", "_hi")))
+        for m in shown:
             if m in r and pd.notna(r[m]):
-                print(f"    {m:16s} {r[m]:6.3f}  [{r[f'{m}_lo']:.3f}, {r[f'{m}_hi']:.3f}]")
+                print(f"    {m:18s} {r[m]:6.3f}  [{r[f'{m}_lo']:.3f}, {r[f'{m}_hi']:.3f}]")
 
     if args.compare:
         a, b = args.compare
         print(f"\n=== paired difference: {a} − {b} ===")
-        diff = paired_difference(samples, a, b)
+        diff = paired_difference(samples, a, b,
+                                 metrics=None if not args.by_subtype else
+                                 [c for c in samples.columns
+                                  if c in METRICS or c.startswith("recall_")])
         print(diff.to_string(index=False, float_format=lambda v: f"{v:7.3f}"))
         print("\n'excludes_zero' true means the data supports a real difference.")
 

@@ -100,14 +100,15 @@ def evaluate_tier(records: pd.DataFrame, budget: float, horizons: list[int]) -> 
 
 
 def run(run_dir: str | Path, horizons: list[int] | None = None,
-        tiers: dict[str, float] | None = None) -> None:
+        tiers: dict[str, float] | None = None, clean_variant: str = "", injected_variant: str = "injected") -> None:
     horizons = horizons or [1, 3, 6]
     if tiers is None:
         cfg = load_config("model").get("decision_layer", {}).get("operating_points")
         tiers = ({name: float(v["target_fpr_overall"]) for name, v in cfg.items()}
                  if cfg else DEFAULT_TIERS)
 
-    records = attach_magnitudes(load_records(run_dir))
+    records = attach_magnitudes(load_records(run_dir),
+                                clean_variant, injected_variant)
     log.info("loaded %s records; tiers: %s", f"{len(records):,}", tiers)
 
     results = {name: evaluate_tier(records, budget, horizons)
@@ -146,8 +147,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir")
     ap.add_argument("--horizons", nargs="*", type=int, default=[1, 3, 6])
+    ap.add_argument("--clean-variant", default="")
+    ap.add_argument("--injected-variant", default="injected")
     args = ap.parse_args()
-    run(args.run_dir, args.horizons)
+    run(args.run_dir, args.horizons, args.clean_variant, args.injected_variant)
 
 
 if __name__ == "__main__":
