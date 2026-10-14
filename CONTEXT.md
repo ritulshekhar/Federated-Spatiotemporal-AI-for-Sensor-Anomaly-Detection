@@ -2629,3 +2629,82 @@ clustering experiment.
 * **Operating points at n=30.** The alert/review split and the magnitude
   stratification are still the 7-station figures, flagged as such in the
   dashboard payload.
+
+---
+
+## [2026-10-14] entry 28 — subtype confidence intervals, and a magnitude table that was lying
+
+### The per-subtype result, finally with stations resampled
+
+The bootstrap library could stratify by subtype but the CLI never exposed it,
+so every per-subtype interval reported until now was **time-resampled only**.
+That makes "better at stuck sensors" a statement about these particular
+stations rather than a general claim. Exposed as `--by-subtype`, and run at 30
+stations with stations resampled:
+
+| subtype | difference | 95% CI | established |
+|---|---|---|---|
+| **dropout** | **+0.348** | [0.221, 0.454] | **yes** |
+| **stuck_at** | **+0.328** | [0.209, 0.443] | **yes** |
+| **spike** | **−0.088** | [−0.121, −0.052] | **yes, and it is worse** |
+| drift | +0.044 | [0.000, 0.117] | no (boundary) |
+| noise | +0.024 | [−0.031, 0.083] | no |
+| bias | +0.002 | [−0.007, 0.013] | no |
+
+`5_fedavg_gru` detects stuck sensors **0.000** of the time. The proposed model
+reaches 0.328.
+
+This is the sharpest statement the project can make, and it is mechanically
+coherent rather than a lucky aggregate. The spatial mechanism wins exactly
+where a fault makes a station *easier* to forecast — a frozen sensor and a
+dropped one both flatten the series, so the local residual **shrinks** and the
+local detector has nothing to work with. It loses, genuinely, on spikes, where
+the local residual was already the best signal available and adding a
+neighbour-agreement term only dilutes it.
+
+Note this also demotes a previous claim. Entry 16's time-only intervals had
+noise at −0.125 [−0.203, −0.045], apparently significant; with stations
+resampled it is +0.024 [−0.031, 0.083] and not established at all.
+
+### The magnitude table was computed from the wrong stations
+
+Recomputing the operating points at n=30 produced a table that looked complete
+and was not. `fault_magnitudes` hardcoded the 7-station variant names (`""` and
+`"injected"`), so for the 30-station run it warned on 24 of 30 stations, skipped
+them, and built the table from the six that still had an old clean build. The
+output is formatted identically either way — there is no visual difference
+between "all 30 stations" and "the 6 with stale files".
+
+Fixed three ways: the variants are parameters, the CLI exposes them, and
+`attach_magnitudes` now **raises** when more than half the node set is missing
+rather than quietly describing the minority. A clean 69-station build
+(`clean71`) was produced so the comparison has a reference at all.
+
+### Operating points, correctly, at 30 stations
+
+| tier | recall | precision | F1 | FPR on extremes |
+|---|---|---|---|---|
+| alert | 0.275 | 0.542 | 0.367 | **0.050** |
+| review | 0.544 | 0.102 | 0.171 | 0.567 |
+
+Against the 7-station figures the alert tier trades a little recall
+(0.315 → 0.275) for better precision (0.480 → 0.542) and a **much better
+false-positive rate on genuine extremes** (0.091 → 0.050). The §8.2 control
+improves as the network grows, which is the opposite of what the India transfer
+suggested would happen to a *single* threshold across heterogeneous stations —
+the difference being that these thresholds are still calibrated per station.
+
+Detection by fault size is now cleanly monotonic, which the 7-station table was
+not:
+
+| band | alert | review |
+|---|---|---|
+| <0.5σ | 0.089 | 0.303 |
+| 0.5–1σ | 0.201 | 0.442 |
+| 1–2σ | 0.211 | 0.549 |
+| 2–5σ | 0.509 | 0.891 |
+| >5σ | **0.946** | **0.999** |
+
+Nearly every large fault is caught; roughly one sub-0.5σ fault in eleven is.
+That spread — a factor of ten across magnitude bands — is why a single headline
+recall number was always misleading.

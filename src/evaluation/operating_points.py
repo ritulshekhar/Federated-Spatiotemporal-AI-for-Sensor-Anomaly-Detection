@@ -150,7 +150,9 @@ def main() -> None:
     ap.add_argument("--clean-variant", default="")
     ap.add_argument("--injected-variant", default="injected")
     args = ap.parse_args()
-    run(args.run_dir, args.horizons, args.clean_variant, args.injected_variant)
+    run(args.run_dir, args.horizons,
+        clean_variant=args.clean_variant,
+        injected_variant=args.injected_variant)
 
 
 if __name__ == "__main__":

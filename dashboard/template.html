@@ -248,8 +248,14 @@ footer{margin-top:52px;border-top:1px solid var(--line);padding-top:20px;
       <div id="cichart"></div></div>
     <div class="chartcard"><h3>Against centralised, no privacy constraint</h3>
       <div id="cichart2"></div></div>
+    <div class="chartcard"><h3>Per fault type, against federated</h3>
+      <div id="cichart3"></div></div>
   </div>
   <p class="snote" id="cinote"></p>
+  <p class="snote">Per fault type, the picture is sharper than the aggregate: the proposed model is
+    decisively better at frozen and dropped sensors -- faults that make a station <em>easier</em> to
+    forecast, so its own error never grows -- and slightly worse at spikes, where that error was
+    already the best available signal.</p>
 </section>
 
 <footer>
@@ -535,6 +541,7 @@ function groupedBars(mountId, rows, series, opts){
   if (note && U.n7_note) note.textContent = U.n7_note;
   drawCI('cichart', U.vs_fedavg || []);
   drawCI('cichart2', U.vs_centralised || []);
+  drawCI('cichart3', U.by_subtype || []);
 })();
 
 function drawCI(mountId, rows){

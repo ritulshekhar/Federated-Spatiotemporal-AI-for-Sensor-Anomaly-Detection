@@ -187,6 +187,14 @@ def uncertainty_block() -> dict:
         ],
         "n7_note": ("At 7 stations nothing survived station resampling: recall "
                     "+0.041 [-0.071, 0.151], F1 +0.006 [-0.102, 0.113]."),
+        "by_subtype": [
+            {"metric": "dropout", "diff": 0.348, "lo": 0.221, "hi": 0.454, "sig": True},
+            {"metric": "stuck_at", "diff": 0.328, "lo": 0.209, "hi": 0.443, "sig": True},
+            {"metric": "drift", "diff": 0.044, "lo": 0.000, "hi": 0.117, "sig": False},
+            {"metric": "noise", "diff": 0.024, "lo": -0.031, "hi": 0.083, "sig": False},
+            {"metric": "bias", "diff": 0.002, "lo": -0.007, "hi": 0.013, "sig": False},
+            {"metric": "spike", "diff": -0.088, "lo": -0.121, "hi": -0.052, "sig": True},
+        ],
     }
 
 
@@ -302,28 +310,31 @@ def build() -> dict:
         "drift": drift_block(),
         "transfer": transfer_block(),
         "uncertainty": uncertainty_block(),
+        # Recomputed on the 30-station run (clean71 vs injected71) rather
+        # than inherited from the 7-station build. The alert tier is stricter
+        # than the ladder's default threshold by design, which is why these
+        # subtype numbers are lower than the ladder's.
         "operating_points": {
-            "alert": {"recall": 0.315, "precision": 0.480, "f1": 0.390,
-                      "fpr_extremes": 0.091},
-            "review": {"recall": 0.575, "precision": 0.066, "f1": 0.118,
-                       "fpr_extremes": 0.610},
+            "alert": {"recall": 0.275, "precision": 0.542, "f1": 0.367,
+                      "fpr_extremes": 0.050},
+            "review": {"recall": 0.544, "precision": 0.102, "f1": 0.171,
+                       "fpr_extremes": 0.567},
             "by_magnitude": [
-                {"band": "<0.5σ", "alert": 0.139, "review": 0.288},
-                {"band": "0.5–1σ", "alert": 0.134, "review": 0.378},
-                {"band": "1–2σ", "alert": 0.130, "review": 0.642},
-                {"band": "2–5σ", "alert": 0.583, "review": 0.923},
-                {"band": ">5σ", "alert": 0.924, "review": 1.000},
+                {"band": "<0.5σ", "alert": 0.089, "review": 0.303},
+                {"band": "0.5–1σ", "alert": 0.201, "review": 0.442},
+                {"band": "1–2σ", "alert": 0.211, "review": 0.549},
+                {"band": "2–5σ", "alert": 0.509, "review": 0.891},
+                {"band": ">5σ", "alert": 0.946, "review": 0.999},
             ],
             "by_subtype": [
-                {"subtype": "spike", "alert": 0.662, "review": 0.946},
-                {"subtype": "noise", "alert": 0.546, "review": 0.930},
-                {"subtype": "stuck_at", "alert": 0.136, "review": 0.267},
-                {"subtype": "dropout", "alert": 0.120, "review": 0.450},
-                {"subtype": "bias", "alert": 0.006, "review": 0.494},
-                {"subtype": "drift", "alert": 0.000, "review": 0.132},
+                {"subtype": "spike", "alert": 0.106, "review": 0.154},
+                {"subtype": "noise", "alert": 0.096, "review": 0.158},
+                {"subtype": "dropout", "alert": 0.045, "review": 0.093},
+                {"subtype": "stuck_at", "alert": 0.044, "review": 0.074},
+                {"subtype": "drift", "alert": 0.009, "review": 0.030},
+                {"subtype": "bias", "alert": 0.003, "review": 0.066},
             ],
-            "note": ("Measured on the 7-station build; the operating-point "
-                     "split has not been recomputed at 30 stations."),
+            "note": "Measured on the 30-station build, horizon 1.",
         },
         "dataset": {
             "region": "Catalonia", "stations": n_stations,
