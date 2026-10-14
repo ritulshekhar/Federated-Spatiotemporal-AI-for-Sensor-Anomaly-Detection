@@ -91,7 +91,139 @@ open risk (`CLAUDE.md` §11). **It does not** — see §7.2.
 
 ---
 
-## 2. Architecture
+## 2. Methodology
+
+### 2A.1 The experimental question, stated precisely
+
+Every experiment in this project answers one of three questions, and keeping
+them apart matters because they have different controls.
+
+| Question | Comparison | Controls for |
+|---|---|---|
+| Does federation cost accuracy? | rung 5 vs rung 3/4 | The privacy constraint |
+| Does spatial reasoning help detection? | rung 6 vs rung 5 | Everything except the graph layer |
+| Does it generalise? | Catalonia-trained model on Delhi | Region, with no retraining |
+
+Rung 5 exists **solely** as the control for the second question. Without it, any
+gain from rung 6 could be credited to federation, to the graph, or to the
+decision layer, with no way to tell them apart. (Section 16 records that this
+control was imperfectly implemented, and what that cost.)
+
+### 2A.2 Splitting, and why it is chronological
+
+Train/validation/test are **70/15/15 by date**, per station, never shuffled.
+Shuffling would place future readings in the training set and leak information
+backwards: a model that has seen Tuesday can trivially "predict" Monday.
+Because stations have different record lengths, each station's split boundaries
+are its own — which is what later produced the overlap problem in Section 14.2.
+
+### 2A.3 Where the threshold comes from
+
+A detector is useless without a decision threshold, and the threshold is where
+most of the methodological danger lives.
+
+* It is calibrated on the **validation** split only, never on test.
+* It is calibrated **per station**, never shared. A shared threshold would be
+  miscalibrated for every station but the median one, and would also leak
+  across the privacy boundary.
+* The rule is `val_fpr_extremes`: pick the threshold that achieves a target
+  false-positive rate on genuinely non-faulty readings. This is preferred over
+  a fixed quantile because the fault rate varies by station, so a fixed
+  quantile means different things at different stations.
+
+### 2A.4 The false-positive budget, and why detectors are calibrated separately
+
+The decision layer runs several detectors and takes the maximum of their
+standardised scores. If each were calibrated to the target false-positive rate
+independently, the combined rate would be several times the target, because any
+one of them firing raises an alarm.
+
+So each detector receives `budget / k` where k is the number of **usable**
+detectors. By the union bound the combined rate then stays under the target no
+matter how many run. "Usable" is decided on the raw outputs: a detector that
+produced no finite values (the spatial detector at a station with no
+neighbours) must not claim a share of the budget it cannot spend.
+
+### 2A.5 Statistical testing: the moving-block bootstrap
+
+Point estimates are not evidence. Every headline comparison is accompanied by a
+95% interval from a **paired moving-block bootstrap**:
+
+* **Blocks, not individual readings**, because air quality is autocorrelated;
+  resampling single hours would pretend there is far more independent evidence
+  than exists, and produce intervals that are too narrow.
+* **Paired**, meaning both models are evaluated on the *same* resample, so the
+  interval is on the difference. Two overlapping individual intervals do not
+  refute a difference, and non-overlapping ones are not required to establish
+  one.
+* **Two resampling levels**, and the distinction is the single most important
+  methodological point in this project:
+  * *Time only* answers "would a different stretch of this period have said
+    the same about these stations?"
+  * *Stations and time* answers "would a different set of stations have said
+    the same?" — which is the question that matters for a general claim.
+
+At 7 stations nothing survived the second test. That is why the node set was
+scaled up, and why several results that looked significant under time-only
+resampling were later withdrawn (Section 12).
+
+### 2A.6 Why accuracy is never reported as a headline
+
+At a 3.5% fault rate, a classifier answering "never faulty" scores 0.965
+accuracy — better than this system's 0.948. Accuracy is dominated by the
+96.5% of readings that are fine, so it measures prevalence rather than skill.
+Precision, recall, F1 and AUC-PR are reported instead, and recall is **never**
+reported without a false-positive rate beside it.
+
+---
+
+## 3. The novelty, stated precisely
+
+It is worth being exact about what is new here, because it is narrower than
+"federated learning for air quality" and that matters for assessing it.
+
+### 2B.1 What is not new
+
+* Federated learning for sensor networks. Established.
+* Graph networks over station networks for forecasting. Established.
+* Residual-based anomaly detection. Established.
+* Using spatial agreement to separate events from faults. Established —
+  this is Ferrer-Cid et al. (2022), on Barcelona data.
+
+### 2B.2 What is new
+
+**Computing spatial agreement from compressed encoder states rather than raw
+neighbour readings.**
+
+Every prior system does one of two things. It either federates a detector and
+gives up cross-node reasoning (Khan 2024, van Dreven 2026), or it reasons
+across nodes and requires raw neighbour data centrally (Lin 2022, Ferrer-Cid
+2022, Hammad 2026). The combination is the contribution: a station is compared
+against its neighbours without any of them revealing what they measured.
+
+### 2B.3 Why it was not obvious that this could work
+
+A hidden state is a lossy 64-dimensional summary of a 24-hour, 22-feature
+window, trained for *forecasting*. Nothing guarantees it preserves the
+information needed to tell "this station disagrees with its neighbourhood"
+from "this neighbourhood is genuinely varied". The design contract listed this
+as the project's single largest open risk, with instructions to report a
+negative result honestly if compression destroyed the signal.
+
+### 2B.4 The current honest status of the claim
+
+The compression does preserve *some* signal — drift detection moves from 0.000
+to 0.012, and the station-level ordinal channel reaches 0.575 precision. But
+Section 16 documents that the headline detection gain attributed to this
+mechanism was confounded with a local detector, and that on controlled
+comparison the spatial detector currently **costs** more than it contributes.
+
+The novelty is therefore intact as a *method* and unproven as an *improvement*.
+Both halves of that sentence are load-bearing.
+
+---
+
+## 4. Architecture: the three tiers
 
 Three tiers, with a hard privacy boundary between the first and second.
 
@@ -166,7 +298,119 @@ how many run. Implementation: `src/models/decision_layer.py`.
 
 ---
 
-## 3. The data, and the discovery that reshaped the project
+## 5. Architecture in detail
+
+### 2C.1 Node tier: the GRU encoder-decoder
+
+| Property | Value |
+|---|---|
+| Input | (batch, 24 hours, 22 features) |
+| Encoder | single-layer GRU, hidden size 64 |
+| Decoder | single-layer GRU, input size 1, hidden size 64 |
+| Head | Linear(64 -> 1) |
+| Output | (batch, 6) — one value per forecast hour |
+| **Parameters** | **29,825** |
+| Dropout | 0.1 |
+
+The decoder is autoregressive: it starts from the station's own last observed
+target value and feeds each prediction back as the next input. During training
+this is mixed with the true value under a **teacher-forcing schedule** that
+decays from 0.5 to 0.0, so the model learns to cope with its own errors
+compounding rather than always being handed the truth.
+
+The encoder's final hidden state is the 64-dimensional vector that crosses the
+privacy boundary. Its size is simultaneously a privacy lever and a
+communication-cost lever — smaller means less disclosed and less transmitted,
+but also less spatial signal available to the server.
+
+### 2C.2 Why a GRU rather than an LSTM or a Transformer
+
+A GRU has two gates against an LSTM's three, so roughly 25% fewer parameters
+for the same hidden size. At 29,825 parameters the model is small enough to be
+plausible on edge hardware and cheap enough to transmit every round —
+communication cost is a reported metric (16.46 MB per round at 69 clients), and
+a Transformer's attention matrices would dominate it. Sequence length here is
+24, which is far below where attention earns its cost.
+
+### 2C.3 Server tier: graph construction
+
+The adjacency matrix is built in `hybrid` mode:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `distance_km_threshold` | 12.0 | Stations within 12 km may be connected |
+| `correlation_threshold` | 0.5 | And must correlate above 0.5 |
+| `self_loops` | true (forecasting) / false (reconstruction) | See below |
+
+Distance alone connects stations that happen to be close but sit in different
+regimes — a street-canyon traffic site and a park 500 m away behave quite
+differently. Correlation alone connects stations that merely share a seasonal
+cycle. Requiring both is what Wang et al. (2020) argue for as physically
+informed edges.
+
+**Self-loops are the subtle part.** For *forecasting* (rung 4) a station's own
+history is legitimate input, so the diagonal is on. For *neighbour
+reconstruction* (rung 6) it must be off: if a node can see itself, the
+reconstruction task becomes the identity function, disagreement collapses to
+zero everywhere, and the detector silently stops working. At 69 stations the
+graph has 3,511 directed edges.
+
+### 2C.4 Server tier: the neighbour reconstructor
+
+| Property | Value |
+|---|---|
+| Input | (windows, stations, 64) hidden states |
+| Attention | learned edge logits, softmax over permitted neighbours |
+| Hops | exactly one |
+| Output | predicted hidden state per node |
+| **Parameters** | **13,380** |
+
+The model learns to predict each node's hidden state **from its neighbours
+only**. Spatial disagreement is then `1 − cosine(predicted, actual)`: when a
+station behaves as its neighbourhood implies, the reconstruction is close and
+disagreement is low; when it goes its own way, disagreement rises.
+
+One hop, not two, and deliberately. With two hops a node's own state reaches
+its neighbours and returns, reintroducing exactly the self-information that
+zeroing the diagonal removed.
+
+### 2C.5 The centralised ST-GNN (rung 4)
+
+| Property | Value |
+|---|---|
+| Structure | shared GRU encoder -> graph mixing -> shared GRU decoder |
+| Graph layers | 2, with residual connections |
+| **Parameters** | **38,145** |
+
+This is the no-privacy ceiling: it sees every station's raw windows at once.
+Residual connections around the graph layers let a station keep its own
+representation when its neighbours have nothing to add.
+
+### 2C.6 Decision layer: four detectors at four timescales
+
+No single test catches every fault type, because the fault types do opposite
+things to the signal.
+
+| Detector | What it measures | Targets |
+|---|---|---|
+| `residual` | Instantaneous abs(y − ŷ) / sigma | Spikes |
+| `accumulated` | Rolling max over 6h and 24h windows | Noise, sustained error |
+| `low_variance` | Typical rolling std / current rolling std | Stuck sensors |
+| `spatial` | 1 − cosine(reconstructed, actual) | Faults with regional context |
+| `drift_cusum` | Page's CUSUM on spatial disagreement | Drift (currently disabled) |
+
+The low-variance detector exists because of an inversion worth restating: every
+other detector asks "is this reading far from expectation?", which a frozen
+sensor passes easily — its readings are *closer* to expectation than a working
+sensor's. So it asks the opposite question, "is this sensor too steady?"
+
+Scores are standardised (median-centred, MAD-scaled) before combination,
+because otherwise whichever detector happens to have the largest numerical
+range would dominate the maximum regardless of what it means.
+
+---
+
+## 6. The data, and the discovery that reshaped the project
 
 ### 3.1 Source
 
@@ -305,7 +549,7 @@ measurement.
 
 ---
 
-## 4. The preprocessing pipeline
+## 7. The preprocessing pipeline
 
 Run **independently per station** — raw station files are never concatenated.
 
@@ -327,7 +571,156 @@ residuals the detector depends on.
 
 ---
 
-## 5. The baseline ladder
+## 8. Parameters, and the reasoning behind each
+
+### 4A.1 Preprocessing
+
+| Parameter | Value | Why this value |
+|---|---|---|
+| `short_gap_hours` | 3 | Gaps up to 3h interpolate linearly; pollution is smooth at that scale |
+| `seasonal_period_hours` | 24 | Longer gaps use the same hour yesterday — the dominant cycle is diurnal |
+| `max_fill_hours` | 168 | Beyond a week, imputation is fabrication; leave NaN and drop the window |
+| `flatline_run_length` | 6 | More than 6 identical consecutive values is physically implausible |
+| `lags` | 1, 24, 168 | Previous hour, same hour yesterday, same hour last week |
+| `rolling_windows` | 6, 24 | Quarter-day and full-day context |
+| `input_hours` | 24 | A full diurnal cycle, so the model sees a complete pattern |
+| `horizon_hours` | 6 | Operationally useful lead time; 1/3/6h reported separately |
+| `stride` | 1 | Every hour starts a window; maximises training data |
+| `min_observed_fraction` | 0.60 | Below this a station is mostly imputation, not measurement |
+| `min_feature_coverage` | 0.80 | An exogenous pollutant below this is dropped for that station |
+
+The last one has a concrete origin: one station gained PM10 and PM2.5 in 2024,
+and because every window requires all features finite, those two columns
+annihilated 48,892 training windows before this gate existed.
+
+### 4A.2 Node model and training
+
+| Parameter | Value | Why |
+|---|---|---|
+| `hidden_size` | 64 | Large enough to encode 24h of 22 features; small enough to transmit |
+| `embedding_size` | 64 | What crosses the privacy boundary — a privacy and comms lever |
+| `num_layers` | 1 | Depth gave no measurable gain at this sequence length |
+| `dropout` | 0.1 | Light; the training sets are large |
+| `epochs` | 40 | Upper bound; early stopping almost always ends it sooner |
+| `batch_size` | 128 (local), 256 (centralised/federated) | Larger where per-round wall time dominates |
+| `lr` | 0.001 | Adam default; no instability observed |
+| `grad_clip` | 1.0 | Autoregressive decoders can produce exploding gradients |
+| `early_stopping_patience` | 6 | On validation loss |
+| `scheduler` | plateau, factor 0.5, patience 3 | Halve the rate when validation stalls |
+
+### 4A.3 Federation
+
+| Parameter | Value | Why |
+|---|---|---|
+| `rounds` | 60 max | Early stopping at patience 8 typically ends it near round 19 |
+| `local_epochs` | 2 | More local work per round means fewer rounds but more client drift |
+| `client_fraction` | 1.0 | Every station participates every round |
+| `aggregation.scheme` | `region_first` | Each region carries equal weight regardless of station count |
+| `gnn_epochs_per_round` | 3 | The server graph is warm-started, so a few epochs suffice |
+
+**Why `region_first` and not sample count.** Plain FedAvg weights a client by
+its data volume, which lets a data-rich region dominate the global model. With
+one region it reduces to uniform, which is the right behaviour: a station with
+a longer record should not outvote one with a shorter record.
+
+### 4A.4 Decision layer
+
+| Parameter | Value | Why |
+|---|---|---|
+| `method` | `val_fpr_extremes` | Calibrate to a false-positive rate, not a fixed quantile |
+| `target_fpr_overall` | 0.005 (alert) / 0.20 (review) | Two operating points, not one |
+| `score.mode` | `absolute` | Residual in station sigma |
+| `spatial_agreement.metric` | cosine | Scale-free; hidden-state magnitude varies by station |
+| `min_neighbours` | 2 | Below this there is no consensus to disagree with |
+| `drift_sigma_per_72h` | [0.01, 2.0] log-uniform | Anchored at the measured real drift rate |
+
+---
+
+## 9. Code walkthrough
+
+~12,000 lines across 54 files. What each part does and why it exists.
+
+### 4B.1 `src/data/` — acquisition and harmonization
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `harmonize.py` | 820 | Maps every source into one schema; unit canonicalisation; sentinel masking |
+| `fetch_cpcb.py` | 385 | OpenAQ discovery and S3 archive download, with retry and failure accounting |
+| `station_metadata.py` | 377 | Station identity, class, coordinates from the EEA registry |
+| `fetch_eea.py` | 359 | EEA Parquet download and the registry join |
+| `fetch_meteo.py` | 239 | ERA5 at station coordinates, chunked yearly with 429/5xx retry |
+| `fetch_colocated.py` | 193 | CAPTOR pairing against reference stations |
+| `colocated_labels.py` | 168 | Real fault labels, rate-matched to the measured EEA rate |
+
+The single most important function is `harmonize._mask_sentinels`, which turns
+the -999 no-data sentinel into genuine missing values. It carries a warning
+that fires when every sentinel row is also a Validity fault — which is how the
+discovery in Section 6.2 surfaced.
+
+### 4B.2 `src/preprocessing/` — the seven-stage pipeline
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `pipeline.py` | 488 | Orchestration; rate import; per-station manifests |
+| `windowing.py` | 371 | Sliding windows, chronological splits, label carriage |
+| `fault_labels.py` | 377 | Rate-matched injection with real episode durations |
+| `normalize.py` | 238 | Per-station z-score; the `level_bucket` ordinal; leak detection |
+| `imputation.py` | 189 | Mask-before-fill, three strategies by gap length |
+| `indexing.py` | 188 | Hourly reindex and coverage logging |
+| `features.py` | 177 | Cyclical encodings, lags, rolling statistics, meteorology join |
+| `validity_screen.py` | 172 | Physical plausibility checks |
+
+`normalize.contains_normalization_statistics` is the privacy guard's detector.
+It is recursive and deliberately over-eager, because a false positive costs a
+developer thirty seconds while a false negative silently voids the project's
+central claim.
+
+### 4B.3 `src/models/` — the three models
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `decision_layer.py` | 348 | Four detectors, per-detector budgets, classification |
+| `server_gnn.py` | 317 | Graph construction, neighbour reconstruction, spatial agreement |
+| `node_gru.py` | 302 | GRU encoder-decoder, teacher forcing, device handling |
+| `st_gnn.py` | 241 | Centralised ST-GNN with masked training |
+
+### 4B.4 `src/federated/` — the privacy boundary
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `server.py` | 294 | FedAvg, split learning loop, early stopping, comms accounting |
+| `aggregation_weights.py` | 216 | region-first, sample-count, uniform, clustered |
+| `client.py` | 196 | Local training, `Upload`, `check_upload` |
+
+`check_upload` is the enforcement point. It reads the permitted field list from
+configuration and asserts the outbound payload against it on **every upload,
+every round** — not in tests, in the training loop.
+
+### 4B.5 `src/evaluation/` — measurement
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `report.py` | 385 | Grouped reporting; raises `PoolingError` on a pooled figure |
+| `metrics.py` | 337 | RMSE/MAE/MAPE, precision/recall/F1/AUC-PR, extreme masks |
+| `uncertainty.py` | 270 | Moving-block bootstrap, paired differences, subtype intervals |
+| `transfer.py` | 211 | Cross-region generalization (Section 15) |
+| `magnitude.py` | 161 | Detection stratified by fault size |
+| `operating_points.py` | 159 | Alert and review tiers |
+
+`report.py` raising on a pooled number is a design decision rather than a
+nicety: the no-pooling rule is structurally enforced, so producing a misleading
+aggregate requires deliberately bypassing it.
+
+### 4B.6 `src/baselines/ladder.py` — 1,201 lines
+
+The largest file, holding all six rungs plus the shared scoring path. Every
+rung routes through `score_station`, so no rung can quietly use a different
+threshold rule or skip the false-positive control. Section 16 describes the
+one place where that routing had a consequential gap.
+
+---
+
+## 10. The baseline ladder
 
 Six rungs, each built and reported before the next, so a defensible result
 exists even if the highest-risk component underperforms.
@@ -347,7 +740,7 @@ effects.
 
 ---
 
-## 6. Results at 30 stations
+## 11. Results at 30 stations
 
 `outputs/phase5_scale30` — corrected injector, meteorology on, GPU.
 
@@ -427,7 +820,7 @@ recall number was always misleading.
 
 ---
 
-## 7. Results at 69 stations — the full network
+## 12. Results at 69 stations — the full network
 
 `outputs/phase8_full69`. This run was **structurally impossible** until
 2026-10-14; see §9.1.
@@ -534,7 +927,7 @@ Recall holds as the network grows; precision falls. See §8.
 
 ---
 
-## 8. The privacy amendment (§2.4a)
+## 13. The privacy amendment (§2.4a)
 
 ### 8.1 Why it was necessary
 
@@ -594,7 +987,7 @@ one flag in three is a genuine local level shift rather than drift.
 
 ---
 
-## 9. Scaling: three walls, three different causes
+## 14. Scaling: three walls, three different causes
 
 Worth recording because each looked like the previous one and was not.
 
@@ -669,7 +1062,7 @@ matters.
 
 ---
 
-## 10. India transfer (§5.8)
+## 15. India transfer (§5.8)
 
 A Catalonia-trained model applied to seven Delhi stations **without
 retraining**, over the 22 feature columns the regions share.
@@ -718,7 +1111,85 @@ capping the Indian window at ~1.6 years.
 
 ---
 
-## 11. What did not work, and what remains open
+## 16. A confound in the headline comparison
+
+Found on 2026-10-14 while investigating how to improve accuracy. It is recorded
+before the summary because it qualifies much of what precedes it.
+
+### What the code actually does
+
+`score_station` branches on one condition:
+
+```python
+if spatial is not None:   # -> four-detector ensemble
+    ...
+elif score_mode == "volatility" / "absolute":
+    ...                   # -> plain residual threshold
+```
+
+Only rung 6 is passed a `spatial` argument. The saved records confirm the
+consequence: rungs 4 and 5 carry **no per-detector scores at all**, while rung 6
+carries all four.
+
+### Why that matters
+
+The rung 6 vs rung 5 comparison was intended to isolate the graph layer. It did
+not. It changed **two things at once**:
+
+1. Added cross-station spatial reasoning — the intended variable.
+2. Swapped a plain residual threshold for a four-detector ensemble including
+   `low_variance` — which is purely local and needs no neighbours, no graph, no
+   embeddings and no federation.
+
+### Which of the two produced the gain
+
+Both rungs share identical forecasts (RMSE 11.19/13.17/13.72 at 69 stations),
+so the per-detector scores saved for rung 6 can be recombined offline to
+separate the effects. Horizon 1, 69 stations:
+
+| configuration | precision | recall | F1 | stuck_at | dropout |
+|---|---|---|---|---|---|
+| local detectors only | **0.589** | **0.273** | **0.373** | 0.266 | **0.252** |
+| local + spatial | 0.569 | 0.259 | 0.356 | 0.264 | 0.234 |
+
+Adding the spatial detector makes precision, recall, F1, stuck_at and dropout
+all *worse*. Only drift improves, 0.004 to 0.012. The same holds at horizon 3.
+
+**The celebrated result — stuck_at from 0.001 to 0.378, "neighbours detect
+faults no local model can" — is the low-variance detector, not the
+neighbours.** A frozen sensor has near-zero variance, which is visible in the
+station's own history.
+
+### What this does and does not invalidate
+
+**Invalidated as stated:** every rung 6 vs rung 5 detection comparison,
+including the F1 +0.062 [0.018, 0.110] result at 69 stations and the per-subtype
+intervals. The correct comparison requires giving rung 5 the same ensemble
+minus the spatial detector. Predicted outcome: rung 5 rises from F1 0.322 to
+about 0.397 at horizon 3, and rung 6's advantage becomes roughly −0.005.
+
+**Not invalidated:** everything that does not depend on the detector mix — the
+forecasting comparisons, the communication costs, the privacy cost in
+forecasting terms, the India transfer, the scaling findings, and the real
+co-located experiment.
+
+### Why it was not caught earlier
+
+The per-detector scores were persisted specifically so combination rules could
+be swept offline. Nobody swept them until the question became "how do we
+improve accuracy", because until then the rung 6 advantage looked like evidence
+that the mechanism worked. A result in the expected direction attracts less
+scrutiny than a surprising one, which is the general lesson.
+
+### The fix
+
+Pass the same decision layer to rung 5 with the spatial detector absent, and
+re-run. The comparison then isolates the graph layer, which is what it was
+always supposed to do.
+
+---
+
+## 17. What did not work, and what remains open
 
 ### 11.1 Clustered aggregation — measured and rejected
 
@@ -761,7 +1232,7 @@ number in this report is measured against synthetic injection.
 
 ---
 
-## 12. Engineering lessons
+## 18. Engineering lessons
 
 Recorded because each cost real time.
 
@@ -784,7 +1255,7 @@ Recorded because each cost real time.
 
 ---
 
-## 13. Reproducing
+## 19. Reproducing
 
 ```bash
 python -m src.data.fetch_eea                       # download EEA E1a
@@ -801,12 +1272,14 @@ India requires a free `OPENAQ_API_KEY` in a gitignored `.env`.
 
 ---
 
-## 14. Honest summary
+## 20. Honest summary
 
-**What is established.** Cross-station spatial reasoning from compressed
-embeddings genuinely improves fault detection — recall +0.119 [0.051, 0.200]
-under the strict resampling test — and genuinely costs precision,
-−0.191 [−0.288, −0.094]. The privacy constraint costs nothing measurable in F1
+**What is established — with Section 16's qualification attached.** The
+detection comparisons between rung 6 and rung 5 are confounded: they changed
+the detector ensemble as well as the spatial mechanism. On controlled
+recombination the spatial detector currently costs more than it contributes,
+and the measured gains belong to a local low-variance detector. The numbers
+below are reported as measured and should be read with that correction. The privacy constraint costs nothing measurable in F1
 against a centralised model with full raw access. Both effects are specific to
 node sets of ~30+; at 7 stations nothing was establishable.
 
@@ -826,7 +1299,7 @@ rather than more compute.
 
 ---
 
-## 15. Changelog of this document
+## 21. Changelog of this document
 
 | Date | Change |
 |---|---|
